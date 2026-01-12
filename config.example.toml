@@ -1,0 +1,19 @@
+[server]
+    host = "0.0.0.0"
+    port = 38080
+
+[auth]
+    enabled = false
+    tokens  = [  ]
+
+[methods]
+    get_enabled  = true
+    post_enabled = true
+
+[logging]
+    level        = "INFO"
+    file_enabled = false
+    file_path    = "/var/log/ddns-gateway.log"
+
+[health]
+    enabled = false

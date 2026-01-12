@@ -1,0 +1,469 @@
+[project]
+    name = "ddns-gateway"
+    version = "0.1.0"
+    description = "DDNS Gateway service for RouterOS - bridges ROS scripts with DNS providers"
+    readme = "README.md"
+    license = { text = "MIT" }
+    requires-python = ">=3.12"
+    keywords = [
+        "ddns",
+        "dns",
+        "routeros",
+        "cloudflare",
+        "aliyun",
+        "tencent",
+        "dnspod",
+    ]
+    classifiers = [
+        "Development Status :: 4 - Beta",
+        "Environment :: Web Environment",
+        "Framework :: FastAPI",
+        "Intended Audience :: System Administrators",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.12",
+        "Topic :: Internet :: Name Service (DNS)",
+        "Topic :: System :: Networking",
+        "Typing :: Typed",
+    ]
+    dependencies = [
+        "fastapi>=0.128.0",
+        "uvicorn[standard]>=0.40.0",
+        "httpx>=0.28.1",
+        "pydantic>=2.12.5",
+        "alibabacloud_alidns20150109>=4.1.0",
+        "tencentcloud-sdk-python-common[async]>=3.1.30",
+        "tencentcloud-sdk-python-dnspod>=3.1.23",
+    ]
+
+    [project.scripts]
+        ddns-gateway = "ddns_gateway.cli:main"
+
+[dependency-groups]
+    dev = [
+        "pytest>=9.0.2",
+        "pytest-asyncio>=1.3.0",
+        "pytest-cov>=7.0.0",
+        "ruff>=0.14.11",
+        "mypy>=1.19.1",
+        "pyright>=1.1.408",
+    ]
+
+[build-system]
+    requires      = [ "hatchling" ]
+    build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+    packages = [ "src/ddns_gateway" ]
+
+[tool.coverage.run]
+    # Whether to measure branch coverage in addition to statement coverage.
+    # Default: false
+    branch = true
+
+    # A list of packages or directories, the source to measure during execution.
+    # If set, `include` is ignored.
+    source = [ "src/ddns_gateway" ]
+
+    # A list of file name patterns, the files to leave out of reporting.
+    # https://coverage.readthedocs.io/en/latest/source.html#file-patterns
+    omit = [ "*/.venv/*", "tests/*", "temp/*" ]
+
+[tool.coverage.report]
+    # Don’t report files that have no executable code (such as `__init__.py` files).
+    # Default: false
+    skip_empty = false
+
+    # When running a summary report, show missing lines.
+    # Default: false
+    show_missing = false
+
+    # Ignore source code that can’t be found, emitting a warning instead of an exception.
+    # Default: false
+    ignore_errors = false
+
+    # Regexes for lines to exclude from consideration
+    # exclude_also = [
+    #     # Don't complain about missing debug-only code:
+    #     "def __repr__",
+    #     "if self\\.debug",
+
+    #     # Don't complain if tests don't hit defensive assertion code:
+    #     "raise AssertionError",
+    #     "raise NotImplementedError",
+
+    #     # Don't complain if non-runnable code isn't run:
+    #     "if 0:",
+    #     "if __name__ == .__main__.:",
+
+    #     # Don't complain about abstract methods, they aren't run:
+    #     "@(abc\\.)?abstractmethod",
+    # ]
+
+    # Lines to exclude from coverage reporting.
+    # These patterns are matched against the source code to skip coverage measurement.
+    exclude_lines = [
+        "pragma: no cover",
+        "if TYPE_CHECKING:",
+        "raise NotImplementedError",
+    ]
+
+[tool.coverage.html]
+    # Where to write the HTML report files.
+    # Default: `htmlcov`
+    directory = "htmlcov"
+
+    # The title to use for the report. Note this is text, not HTML.
+    # Default: "Coverage report"
+    title = "Test Coverage Report"
+
+[tool.isort]
+    # 注意: VSCode 中, 修改配置后可能需要执行 'isort: restart server' (isort.restart) 命令才能生效
+    # 如果依旧不行, 可以尝试重启 VSCode
+    # 同时, 命令菜单中的 'isort: Sort python imports' 命令似乎需要文件已经保存后才能触发排序
+    profile = "black"
+    src_paths = [ "src", "tests" ]
+    sections = [
+        "FUTURE",
+        "STDLIB",
+        "SETVENV",
+        "THIRDPARTY",
+        "FIRSTPARTY",
+        "LOCALFOLDER",
+    ]
+    known_setvenv = [ "venv_manager" ]
+    #import_heading_setvenv = "Set up virtual environment"
+    #no_lines_before = "SETVENV"
+    #force_sort_within_sections=true
+
+[tool.mypy]
+    # strict = true
+    strict = false
+
+    # Python version to use for type checking.
+    python_version = "3.12"
+
+    enable_error_code = [ "ignore-without-code", "deprecated" ]
+
+    # 确保 ./tests/xxx.py 中 "import common.xxx" 时, 能正确找到 ./src/common/xxx.py
+    mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
+
+    # 指定虚拟环境 Python 解释器, 确保全局安装的 mypy 能找到虚拟环境中安装的包
+    # python_executable = ".venv/bin/python3"
+    python_executable = "$MYPY_CONFIG_FILE_DIR/.venv/bin/python3"
+
+    # 忽略 tests 文件夹
+    exclude = "(^tests/)"
+
+[tool.pyrefly]
+    # project-excludes = [ "**/tests/" ]
+
+    project-excludes        = [ "tests/" ]
+    python-interpreter-path = ".venv/bin/python3"
+    search-path             = [ ".", "src" ]
+
+    [tool.pyrefly.errors]
+        deprecated = "error"
+
+[tool.pyright]
+    # typeCheckingMode = "off"
+    # typeCheckingMode = "basic"
+    typeCheckingMode = "standard"
+    # typeCheckingMode = "strict"
+
+    # Python version to use for type checking.
+    pythonVersion = "3.12"
+
+    # Report missing imports as errors.
+    reportMissingImports = "error"
+
+    # Report missing type stubs for imported packages.
+    #reportMissingTypeStubs = "none"
+    #reportMissingTypeStubs = false
+    reportMissingTypeStubs = true
+
+    # 对于 src 目录下的所有源文件, 在类型检查时将其根目录视为 src, 以便正确解析模块导入和相关搜索路径设置.
+    executionEnvironments = [ { root = "src" } ]
+
+    # Additional search paths that will be used when searching for modules imported by files.
+    # extraPaths = [ "src" ]
+
+    # 对于命令行 CLI 工具, 需要设置此项, 以让 pyright 正确找到虚拟环境中安装的包
+    # 否则, 需要在 CLI 命令传入 "--pythonpath" 参数来指定虚拟环境中的 Python 解释器
+    # 或是使用虚拟环境中安装的 pyright (也可以先激活对应的虚拟环境, 然后再使用全局安装的 pyright 就不会报错了)
+    # 注意: 对于 VSCode / PyCharm 插件, 无需设置, 只要选择了正确的 Python 解释器 pyright 即可正确找到对应虚拟环境中的包
+    # 另外, pyright 官方也不建议使用此设置, 且此设置可能会在未来被移除
+    venv     = ".venv"
+    venvPath = "."
+
+    # 忽略 tests 文件夹
+    # exclude = [ "tests/" ]
+    ignore = [ "tests/" ]
+
+# [tool.pytest.ini_options]
+[tool.pytest]
+
+    # Sets list of directories that should be searched for tests when no specific directories, files or test ids are given
+    # in the command line when executing pytest from the rootdir directory.
+    # File system paths may use shell-style wildcards, including the recursive ** pattern.
+    #
+    # Useful when all project tests are in a known location to speed up test collection and to avoid picking up undesired tests by accident.
+    testpaths = [ "tests" ]
+
+    # Add the specified OPTS to the set of command line arguments as if they had been specified by the user.
+    #
+    # 使用 pytest 建议的 "importlib" 导入模式.
+    # 同时, 由于我们不使用 pip 的 --editable 模式安装包 ("pip install -e /path/to/module" / "uv pip install -e /path/to/module"),
+    # 这里还要设置 pytest 的 pythonpath, 添加 "src" 目录, 以扩展 Python 的模块搜索路径, 正确找到我们本地的包.
+    # ( 或者也可以设置 PYTHONPATH 环境变量 )
+    # 详细说明, 参考:
+    # https://docs.pytest.org/en/latest/explanation/goodpractices.html
+    # https://docs.pytest.org/en/latest/explanation/pythonpath.html
+    # https://docs.pytest.org/en/latest/example/pythoncollection.html
+    # 另外, 一并设置 coverage report 输出格式, 启用 HTML 覆盖率报告
+    #
+    # 注意: 需要在项目根目录下运行 pytest 命令, 否则在指定 `--cov=src` 时会由于找不到 `src` 目录而提示 "CovReportWarning: Failed to generate report: No data to report",
+    # 或是指定 `--cov=.` 时会把目标目录当成当前文件夹, 从而针对错误的目录生成覆盖率报告.
+    #
+    # 另外注意, 需要使用虚拟环境中安装的 pytest 命令. 如果要使用全局安装的 pytest 命令, 需要确保安装了 pytest-cov 插件,
+    # 否则会因为找不到 pytest-cov 命令而报错:
+    # "pytest: error: unrecognized arguments: --cov=. --cov-report=html --cov-branch"
+    #
+    # addopts = [ "--import-mode=importlib" ]
+    #
+    # addopts = [
+    #     "--import-mode=importlib",
+    #     "--cov=.",
+    #     "--cov-report=html",
+    #     "--cov-report=term-missing",
+    #     "--cov-branch",
+    # ]
+    addopts = [
+        "--import-mode=importlib",
+        "--cov=.",
+        "--cov-report=html",
+        "--cov-branch",
+        "-v",
+        "--tb=short",
+    ]
+
+    # ets list of directories that should be added to the python search path.
+    # Directories will be added to the head of sys.path.
+    # Similar to the PYTHONPATH environment variable, the directories will be included in where Python will look for imported modules.
+    # Paths are relative to the rootdir directory. Directories remain in path for the duration of the test session.
+    pythonpath = [ "src" ]
+
+    # Automatically detect async tests and fixtures.
+    asyncio_mode = "auto"
+
+    # Default event loop scope for async fixtures.
+    asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+
+    # Extend the global configuration
+    #extend = "/Users/icasture/.config/ruff/ruff.toml"
+
+    # Ruff supports a top-level "src" option in lieu of isort's "src_paths" setting.
+    # All paths are relative to the project root, which is the directory containing the pyproject.toml.
+    # If the src field is omitted, Ruff will default to using the "project root", along with a "src" subdirectory, as the first-party sources, to support both flat and nested project layouts.
+    # The "project root" is typically the directory containing your pyproject.toml, ruff.toml, or .ruff.toml file,
+    # unless a configuration file is provided on the command-line via the --config option, in which case, the current working directory is used as the project root.
+    # https://docs.astral.sh/ruff/contributing/#import-categorization
+    # https://docs.astral.sh/ruff/faq/#how-does-ruff-determine-which-of-my-imports-are-first-party-third-party-etc
+    #src = [ "src" ]
+
+    # Same as Black.
+    # The line length to use when enforcing long-lines violations (like `E501`) and at which `isort` and the formatter prefers to wrap lines.
+    # The length is determined by the number of characters per line, except for lines containing East Asian characters or emojis.
+    # For these lines, the "unicode width" (https://unicode.org/reports/tr11/) of each character is added up to determine the length.
+    # The value must be greater than `0` and less than or equal to `320`.
+    # Note: While the formatter will attempt to format lines such that they remain within the `line-length`, it isn't a hard upper bound, and formatted lines may exceed the `line-length`.
+    # See `pycodestyle.max-line-length` to configure different lengths for `E501` and the formatter.
+    line-length = 88
+
+    # Same as Black.
+    indent-width = 4
+
+    # Assume Python 3.12.
+    # The minimum Python version to target, used to determine which rules to enable.
+    target-version = "py312"
+
+    # Enable fix behavior by-default when running ruff (overridden by the `--fix` and `--no-fix` command-line flags).
+    # Only includes automatic fixes unless `--unsafe-fixes` is provided.
+    # fix = true
+
+    # Exclude a variety of commonly ignored directories.
+    exclude = [
+        ".bzr",
+        ".direnv",
+        ".eggs",
+        ".git",
+        ".git-rewrite",
+        ".hg",
+        ".ipynb_checkpoints",
+        ".mypy_cache",
+        ".nox",
+        ".pants.d",
+        ".pyenv",
+        ".pytest_cache",
+        ".pytype",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+        ".vscode",
+        "__pypackages__",
+        "_build",
+        "buck-out",
+        "build",
+        "dist",
+        "node_modules",
+        "site-packages",
+        "venv",
+    ]
+
+    [tool.ruff.lint]
+        # Currently, the Ruff formatter does not sort imports. In order to both sort imports and format, call the Ruff linter and then the formatter:
+        # '$ ruff check --select I --fix'
+        # '$ ruff format'
+        # select = ["I"]
+        # extend-select = ["I"]
+
+        select = [ "ALL" ]
+
+        ignore = [
+            "C901", # complex-structure
+            # "D100", # undocumented-public-module
+            # "E501", # line-too-long
+            "ERA001",  # Commented-out code is dead code
+            "PLR0911", # too-many-return-statements
+            "PLR0912", # too-many-branches
+            # "PLR0913", # too-many-arguments
+            # "PLR0915", # too-many-statements
+            "TD003", # missing-todo-link
+            # "UP007", # non-pep604-annotation-union
+            "UP009", # utf8-encoding-declaration
+        ]
+
+        # Allow fix for all enabled rules (when `--fix`) is provided.
+        fixable   = [ "ALL" ]
+        unfixable = [  ]
+
+        # Allow unused variables when underscore-prefixed.
+        dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+        [tool.ruff.lint.extend-per-file-ignores]
+            # "tests/*" = [ "S101", "SLF001" ]
+            "tests/*" = [
+                "S101",   # assert
+                "SLF001", # private-member-access
+                "D102",   # undocumented-public-method
+                "D103",   # undocumented-public-function
+                "ANN",    # flake8-annotations
+            ]
+
+        [tool.ruff.lint.pycodestyle]
+            # `E501` reports lines that exceed the length of 120.
+            #
+            # The maximum line length to allow for `line-too-long` violations (`E501`).
+            # By default (`null`), this is set to the value of the `line-length` option.
+            # Use this option when you want to detect extra-long lines that the formatter can't automatically split by setting `pycodestyle.line-length` to a value larger than `line-length`.
+            # The length is determined by the number of characters per line, except for lines containing East Asian characters or emojis.
+            # For these lines, the "unicode width" (https://unicode.org/reports/tr11/) of each character is added up to determine the length.
+            # See the `line-too-long` rule for more information.
+            max-line-length = 120
+
+            # The maximum line length to allow for `doc-line-too-long` violations within documentation (`W505`), including standalone comments.
+            # By default, this is set to `null` which disables reporting violations.
+            # The length is determined by the number of characters per line, except for lines containing Asian characters or emojis.
+            # For these lines, the "unicode width" (https://unicode.org/reports/tr11/) of each character is added up to determine the length.
+            # See the `doc-line-too-long` rule for more information.
+            # max-doc-length = 120
+
+            # Whether line-length violations (E501) should be triggered for comments starting with task-tags (by default: `TODO`, `FIXME`, and `XXX`).
+            # https://docs.astral.sh/ruff/settings/#lint_task-tags
+            ignore-overlong-task-comments = true
+
+        [tool.ruff.lint.pydocstyle]
+            convention = "numpy"
+
+        [tool.ruff.lint.pylint]
+            max-args = 10
+
+        [tool.ruff.lint.isort]
+            # The settings here are mainly aligned with using isort with the Black profile.
+
+            # How does Ruff's import sorting compare to isort?
+            # See: https://docs.astral.sh/ruff/faq/#how-does-ruffs-import-sorting-compare-to-isort
+
+            # Forces all from imports to appear on their own line.
+            # Default value: false
+            force-single-line = false
+
+            # Override in which order the sections should be output. Can be used to move custom sections.
+            # Default value: ["future", "standard-library", "third-party", "first-party", "local-folder"]
+            section-order = [
+                "future",
+                "standard-library",
+                "setvenv",
+                "third-party",
+                "first-party",
+                "local-folder",
+            ]
+
+            # A list of sections that should not be delineated from the previous section via empty lines.
+            #no-lines-before = ["setvenv"]
+
+            # Whether to place "closer" imports (fewer . characters, most local) before "further" imports (more . characters, least local), or vice versa.
+            # Default value: "furthest-to-closest"
+            #relative-imports-order = "closest-to-furthest"
+
+            # Combines as imports on the same line. See isort's combine-as-imports option.
+            # Default value: false
+            combine-as-imports = false
+
+            # Force "from ... import ..." statements with multiple members and at least one alias (as import)
+            # to be wrapped such that each member is on its own line.
+            # Only effective when "combine-as-imports = true" is set.
+            # When using the formatter, ensure that format.skip-magic-trailing-comma is set to false (default)
+            # when enabling force-wrap-aliases to avoid that the formatter collapses members
+            # if they all fit on a single line.
+            # Default value: false
+            force-wrap-aliases = false
+
+            # Don't sort straight-style imports (like import sys) before from-style imports (like from itertools import groupby).
+            # Instead, sort the imports by module, independent of import style.
+            # Default value: false
+            #force-sort-within-sections = true
+
+            [tool.ruff.lint.isort.sections]
+                # heading setting for isort is not supported yet. See: https://github.com/astral-sh/ruff/issues/6371
+                "setvenv" = [ "venv_manager" ]
+
+    [tool.ruff.format]
+        # Like Black, use double quotes for strings.
+        quote-style = "double"
+
+        # Like Black, indent with spaces, rather than tabs.
+        indent-style = "space"
+
+        # Like Black, respect magic trailing commas.
+        skip-magic-trailing-comma = false
+
+        # Like Black, automatically detect the appropriate line ending.
+        # line-ending = "auto"
+        line-ending = "lf"
+
+        # Enable auto-formatting of code examples in docstrings.
+        # Markdown, reStructuredText code/literal blocks and doctests are all supported.
+        #
+        # This is currently disabled by default, but it is planned for this to be opt-out in the future.
+        # docstring-code-format = false
+        docstring-code-format = true
+
+        # Set the line length limit used when formatting code snippets in docstrings.
+        #
+        # This only has an effect when the `docstring-code-format` setting is enabled.
+        docstring-code-line-length = "dynamic"
