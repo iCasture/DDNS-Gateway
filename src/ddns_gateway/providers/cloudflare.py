@@ -14,6 +14,7 @@ import httpx
 from starlette import status as st_status
 
 from ddns_gateway.providers.base import BaseDNSProvider, ProviderResult
+from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 if TYPE_CHECKING:
     from typing import Final
@@ -43,6 +44,55 @@ class CloudFlareProvider(BaseDNSProvider):
     def name(self) -> str:
         """Get the provider name."""
         return "cloudflare"
+
+    # =========================================================================
+    # New Interface (Phase 2 Refactoring) - Stub Implementations
+    # TODO: Implement in Stage 2.3
+    # =========================================================================
+
+    async def find_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        credentials: dict[str, str],
+    ) -> ExistingRecord | None:
+        """Find an existing DNS record. (Stub - to be implemented in Stage 2.3)."""
+        raise NotImplementedError("find_record will be implemented in Stage 2.3")
+
+    async def create_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Create a new DNS record. (Stub - to be implemented in Stage 2.3)."""
+        raise NotImplementedError("create_record will be implemented in Stage 2.3")
+
+    async def update_record_v2(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Update an existing DNS record. (Stub - to be implemented in Stage 2.3)."""
+        raise NotImplementedError("update_record_v2 will be implemented in Stage 2.3")
+
+    async def delete_record(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Delete an existing DNS record. (Stub - to be implemented in Stage 2.3)."""
+        raise NotImplementedError("delete_record will be implemented in Stage 2.3")
+
+    # =========================================================================
+    # Legacy Interface
+    # =========================================================================
 
     async def update_record(
         self,

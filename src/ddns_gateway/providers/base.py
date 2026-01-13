@@ -8,13 +8,20 @@ implementations must inherit from.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from ddns_gateway.models import ProviderMetadata, RecordType, WarningModel
+
+if TYPE_CHECKING:
+    from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 
 class ProviderResult:
     """
-    Result of a provider operation.
+    Result of a provider operation (legacy).
+
+    This class is kept for backward compatibility with existing code.
+    New code should use UpstreamResult from types.py instead.
 
     Attributes
     ----------
@@ -107,7 +114,11 @@ class BaseDNSProvider(ABC):
     Abstract base class for DNS providers.
 
     All DNS provider implementations must inherit from this class
-    and implement the `update_record` method.
+    and implement the required abstract methods.
+
+    The new interface (find_record, create_record, update_record_v2, delete_record)
+    is designed for the refactored API. The legacy update_record method is kept
+    for backward compatibility during the transition.
     """
 
     @property
@@ -119,9 +130,138 @@ class BaseDNSProvider(ABC):
         Returns
         -------
         str
-            Provider name identifier.
+            Provider name identifier (lowercase).
         """
         ...
+
+    # =========================================================================
+    # New Interface (Phase 2 Refactoring)
+    # =========================================================================
+
+    @abstractmethod
+    async def find_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        credentials: dict[str, str],
+    ) -> ExistingRecord | None:
+        """
+        Find an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized, e.g., "example.com").
+        record : str
+            The host record name (normalized, e.g., "home", "@").
+        record_type : RecordType
+            The record type (A, AAAA, CNAME, TXT).
+        credentials : dict[str, str]
+            Provider-specific credentials.
+
+        Returns
+        -------
+        ExistingRecord | None
+            The existing record if found, None otherwise.
+
+        Raises
+        ------
+        ProviderError
+            If multiple matching records are found or an API error occurs.
+        """
+        ...
+
+    @abstractmethod
+    async def create_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """
+        Create a new DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        record : str
+            The host record name (normalized).
+        record_type : RecordType
+            The record type (A, AAAA, CNAME, TXT).
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Provider-specific credentials.
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the create operation.
+        """
+        ...
+
+    @abstractmethod
+    async def update_record_v2(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """
+        Update an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        existing : ExistingRecord
+            The existing record to update.
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Provider-specific credentials.
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the update operation.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_record(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """
+        Delete an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        existing : ExistingRecord
+            The existing record to delete.
+        credentials : dict[str, str]
+            Provider-specific credentials.
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the delete operation.
+        """
+        ...
+
+    # =========================================================================
+    # Legacy Interface (kept for backward compatibility)
+    # =========================================================================
 
     @abstractmethod
     async def update_record(
@@ -135,7 +275,10 @@ class BaseDNSProvider(ABC):
         comment: str | None = None,
     ) -> ProviderResult:
         """
-        Update or create a DNS record.
+        Update or create a DNS record (legacy interface).
+
+        This method is kept for backward compatibility. New code should use
+        the find_record + create_record/update_record_v2 pattern instead.
 
         This method should:
         1. Query existing records matching zone + record + type
@@ -166,6 +309,10 @@ class BaseDNSProvider(ABC):
             The result of the operation.
         """
         ...
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
 
     def build_fqdn(self, zone: str, record: str) -> str:
         """

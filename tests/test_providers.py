@@ -35,7 +35,8 @@ class TestProviderResult:
 
     def test_result_with_warnings(self):
         warning = WarningModel(
-            code="comment_partial", message="Failed to update remark",
+            code="comment_partial",
+            message="Failed to update remark",
         )
         result = ProviderResult(
             success=True,
@@ -72,6 +73,18 @@ class TestBaseDNSProvider:
             def name(self):
                 return "test"
 
+            async def find_record(self, *args, **kwargs):
+                pass
+
+            async def create_record(self, *args, **kwargs):
+                pass
+
+            async def update_record_v2(self, *args, **kwargs):
+                pass
+
+            async def delete_record(self, *args, **kwargs):
+                pass
+
             async def update_record(self, *args, **kwargs):
                 pass
 
@@ -84,6 +97,18 @@ class TestBaseDNSProvider:
             @property
             def name(self):
                 return "test"
+
+            async def find_record(self, *args, **kwargs):
+                pass
+
+            async def create_record(self, *args, **kwargs):
+                pass
+
+            async def update_record_v2(self, *args, **kwargs):
+                pass
+
+            async def delete_record(self, *args, **kwargs):
+                pass
 
             async def update_record(self, *args, **kwargs):
                 pass
