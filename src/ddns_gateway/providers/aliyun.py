@@ -15,8 +15,9 @@ from alibabacloud_alidns20150109.client import Client as AlidnsClient
 from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_tea_util import models as util_models
 
-from ddns_gateway.models import RecordType, WarningModel
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderResult
+from ddns_gateway.models import RecordType, WarningCode, WarningModel
+from ddns_gateway.normalize import comments_equal, normalize_upstream_value
+from ddns_gateway.providers.base import BaseDNSProvider, ProviderError, ProviderResult
 from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 if TYPE_CHECKING:
@@ -81,8 +82,72 @@ class AliyunProvider(BaseDNSProvider):
         record_type: RecordType,
         credentials: dict[str, str],
     ) -> ExistingRecord | None:
-        """Find an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
-        raise NotImplementedError("find_record will be implemented in Stage 2.4")
+        """
+        Find an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        record : str
+            The host record name (normalized).
+        record_type : RecordType
+            The record type.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        ExistingRecord | None
+            The existing record if found, None otherwise.
+
+        Raises
+        ------
+        ProviderError
+            If multiple records are found or API error occurs.
+        """
+        access_key_id = credentials.get("id")
+        access_key_secret = credentials.get("secret")
+
+        if not access_key_id or not access_key_secret:
+            msg = "Missing required credentials: id and secret"
+            raise ProviderError(msg)
+
+        client = self._create_client(access_key_id, access_key_secret)
+        runtime = util_models.RuntimeOptions()
+
+        records = await self._describe_records(
+            client,
+            runtime,
+            zone,
+            record,
+            record_type,
+        )
+
+        if records is None:
+            msg = "Failed to query DNS records from Aliyun API"
+            raise ProviderError(msg)
+
+        if len(records) == 0:
+            return None
+
+        if len(records) > 1:
+            msg = f"Multiple records found for {record}.{zone} ({record_type.value}), manual resolution required"
+            raise ProviderError(msg)
+
+        raw = records[0]
+        return ExistingRecord(
+            record_id=str(raw.get("record_id", "")),
+            zone_id=None,  # Aliyun does not use zone_id
+            value=normalize_upstream_value(
+                str(raw.get("value", "")),
+                record_type.value,
+            ),
+            ttl=int(raw.get("ttl", 0)),
+            comment=raw.get("remark"),
+            proxied=None,  # Not supported by Aliyun
+            raw=raw,
+        )
 
     async def create_record(
         self,
@@ -92,8 +157,62 @@ class AliyunProvider(BaseDNSProvider):
         desired: DesiredState,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Create a new DNS record. (Stub - to be implemented in Stage 2.4)."""
-        raise NotImplementedError("create_record will be implemented in Stage 2.4")
+        """
+        Create a new DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        record : str
+            The host record name (normalized).
+        record_type : RecordType
+            The record type.
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the create operation.
+        """
+        access_key_id = credentials.get("id")
+        access_key_secret = credentials.get("secret")
+
+        if not access_key_id or not access_key_secret:
+            return UpstreamResult(
+                success=False,
+                action="created",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(access_key_id, access_key_secret)
+        runtime = util_models.RuntimeOptions()
+
+        # Delegate to legacy _add_record helper
+        result = await self._add_record(
+            client,
+            runtime,
+            zone,
+            record,
+            record_type,
+            desired.value,
+            desired.ttl,
+            desired.comment,
+        )
+
+        # Convert ProviderResult to UpstreamResult
+        return UpstreamResult(
+            success=result.success,
+            action=result.action or "created",
+            message=result.message,
+            record_id=result.record_id,
+            zone_id=None,
+            extra={"request_id": result.request_id} if result.request_id else None,
+            warnings=result.warnings,
+        )
 
     async def update_record_v2(
         self,
@@ -102,8 +221,125 @@ class AliyunProvider(BaseDNSProvider):
         desired: DesiredState,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Update an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
-        raise NotImplementedError("update_record_v2 will be implemented in Stage 2.4")
+        """
+        Update an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized). Unused in this implementation.
+
+            This argument is kept to satisfy the BaseDNSProvider interface,
+            but Aliyun uses the record_id from the existing record instead.
+        existing : ExistingRecord
+            The existing record to update.
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the update operation.
+        """
+        _ = zone  # Unused, as we use record_id from ExistingRecord
+        access_key_id = credentials.get("id")
+        access_key_secret = credentials.get("secret")
+
+        if not access_key_id or not access_key_secret:
+            return UpstreamResult(
+                success=False,
+                action="updated",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(access_key_id, access_key_secret)
+        runtime = util_models.RuntimeOptions()
+
+        # Get record type from raw data
+        record_type = existing.raw.get("type", "")
+
+        # Normalize desired value for comparison
+        desired_value_normalized = normalize_upstream_value(desired.value, record_type)
+
+        # Check if update is needed
+        value_changed = existing.value != desired_value_normalized
+        ttl_changed = desired.ttl is not None and existing.ttl != desired.ttl
+        comment_changed = desired.comment is not None and not comments_equal(
+            existing.comment,
+            desired.comment,
+        )
+
+        if not value_changed and not ttl_changed and not comment_changed:
+            return UpstreamResult(
+                success=True,
+                action="nochange",
+                message=f"DNS record unchanged for {existing.raw.get('rr', '')}",
+                record_id=existing.record_id,
+                zone_id=None,
+            )
+
+        warnings: list[WarningModel] = []
+        request_id: str | None = None
+
+        # Update record if value or ttl changed
+        if value_changed or ttl_changed:
+            try:
+                request = alidns_models.UpdateDomainRecordRequest(
+                    record_id=existing.record_id,
+                    rr=existing.raw.get("rr", ""),
+                    type=record_type,
+                    value=desired.value,
+                )
+                if desired.ttl is not None:
+                    request.ttl = desired.ttl
+                response = await client.update_domain_record_with_options_async(
+                    request,
+                    runtime,
+                )
+                request_id = response.body.request_id
+
+                logger.debug("[aliyun] UpdateDomainRecord -> RequestId: %s", request_id)
+                logger.debug("[aliyun] Response: %s", response.body.to_map())
+
+            except Exception as e:  # noqa: BLE001
+                logger.error(  # noqa: TRY400
+                    "[aliyun: UpdateDomainRecord] Failed to update: '%s'",
+                    e,
+                )
+                return UpstreamResult(
+                    success=False,
+                    action="updated",
+                    message=f"Failed to update record: {e}",
+                )
+
+        # Update remark if changed (separate API call)
+        if comment_changed and desired.comment is not None:
+            remark_result = await self._update_record_remark(
+                client,
+                runtime,
+                existing.record_id,
+                desired.comment,
+            )
+            if not remark_result:
+                warnings.append(
+                    WarningModel(
+                        code=WarningCode.ALI_COMMENT_UPDATE_FAILED,
+                        message="Record updated but failed to update remark",
+                    ),
+                )
+
+        return UpstreamResult(
+            success=True,
+            action="updated",
+            message=f"DNS record updated for {existing.raw.get('rr', '')}",
+            record_id=existing.record_id,
+            zone_id=None,
+            previous_value=existing.value if value_changed else None,
+            extra={"request_id": request_id} if request_id else None,
+            warnings=warnings if warnings else None,
+        )
 
     async def delete_record(
         self,
@@ -111,8 +347,72 @@ class AliyunProvider(BaseDNSProvider):
         existing: ExistingRecord,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Delete an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
-        raise NotImplementedError("delete_record will be implemented in Stage 2.4")
+        """
+        Delete an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized). Unused in this implementation.
+
+            This argument is kept to satisfy the BaseDNSProvider interface,
+            but Aliyun uses the record_id from the existing record instead.
+        existing : ExistingRecord
+            The existing record to delete.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the delete operation.
+        """
+        _ = zone  # Unused, as we use record_id from ExistingRecord
+        access_key_id = credentials.get("id")
+        access_key_secret = credentials.get("secret")
+
+        if not access_key_id or not access_key_secret:
+            return UpstreamResult(
+                success=False,
+                action="deleted",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(access_key_id, access_key_secret)
+        runtime = util_models.RuntimeOptions()
+
+        try:
+            request = alidns_models.DeleteDomainRecordRequest(
+                record_id=existing.record_id,
+            )
+            response = await client.delete_domain_record_with_options_async(
+                request,
+                runtime,
+            )
+            request_id = response.body.request_id
+
+            logger.debug("[aliyun] DeleteDomainRecord -> RequestId: %s", request_id)
+            logger.debug("[aliyun] Response: %s", response.body.to_map())
+
+            return UpstreamResult(
+                success=True,
+                action="deleted",
+                message=f"DNS record deleted for {existing.raw.get('rr', '')}",
+                record_id=existing.record_id,
+                zone_id=None,
+                extra={"request_id": request_id} if request_id else None,
+            )
+
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
+                "[aliyun: DeleteDomainRecord] Failed to delete: '%s'",
+                e,
+            )
+            return UpstreamResult(
+                success=False,
+                action="deleted",
+                message=f"Failed to delete record: {e}",
+            )
 
     # =========================================================================
     # Legacy Interface
@@ -224,8 +524,8 @@ class AliyunProvider(BaseDNSProvider):
                 ),
             )
 
-        except Exception as e:
-            logger.error("[aliyun] Failed to query/manipulate records: '%s'", e)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[aliyun] Failed to query/manipulate records: '%s'", e)  # noqa: TRY400
             return ProviderResult(
                 success=False,
                 message=f"Alibaba Cloud DNS error: {e}",
@@ -294,8 +594,8 @@ class AliyunProvider(BaseDNSProvider):
                 if r.rr == rr and r.type == record_type.value
             ]
 
-        except Exception as e:
-            logger.error(
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
                 "[aliyun: DescribeDomainRecords] Failed to describe domain records: '%s'",
                 e,
             )
@@ -389,8 +689,8 @@ class AliyunProvider(BaseDNSProvider):
                 warnings=warnings,
             )
 
-        except Exception as e:
-            logger.error(
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
                 "[aliyun: AddDomainRecord] Failed to add domain record: '%s'",
                 e,
             )
@@ -476,8 +776,8 @@ class AliyunProvider(BaseDNSProvider):
                 logger.debug("[aliyun] UpdateDomainRecord -> RequestId: %s", request_id)
                 logger.debug("[aliyun] Response: %s", response.body.to_map())
 
-            except Exception as e:
-                logger.error(
+            except Exception as e:  # noqa: BLE001
+                logger.error(  # noqa: TRY400
                     "[aliyun: UpdateDomainRecord] Failed to update domain record: '%s'",
                     e,
                 )
@@ -551,10 +851,11 @@ class AliyunProvider(BaseDNSProvider):
                 "[aliyun] UpdateDomainRecordRemark -> RequestId: %s",
                 response.body.request_id,
             )
-            return True
-        except Exception as e:
-            logger.error(
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
                 "[aliyun: UpdateDomainRecordRemark] Failed to update record remark: '%s'",
                 e,
             )
             return False
+
+        return True
