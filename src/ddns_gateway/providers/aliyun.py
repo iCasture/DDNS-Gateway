@@ -17,6 +17,7 @@ from alibabacloud_tea_util import models as util_models
 
 from ddns_gateway.models import RecordType, WarningModel
 from ddns_gateway.providers.base import BaseDNSProvider, ProviderResult
+from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 if TYPE_CHECKING:
     from typing import Any, Final
@@ -68,6 +69,54 @@ class AliyunProvider(BaseDNSProvider):
             endpoint=ALIDNS_ENDPOINT,
         )
         return AlidnsClient(config)
+
+    # =========================================================================
+    # New Interface (Phase 2 Refactoring) - Stub Implementations
+    # =========================================================================
+
+    async def find_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        credentials: dict[str, str],
+    ) -> ExistingRecord | None:
+        """Find an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
+        raise NotImplementedError("find_record will be implemented in Stage 2.4")
+
+    async def create_record(
+        self,
+        zone: str,
+        record: str,
+        record_type: RecordType,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Create a new DNS record. (Stub - to be implemented in Stage 2.4)."""
+        raise NotImplementedError("create_record will be implemented in Stage 2.4")
+
+    async def update_record_v2(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        desired: DesiredState,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Update an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
+        raise NotImplementedError("update_record_v2 will be implemented in Stage 2.4")
+
+    async def delete_record(
+        self,
+        zone: str,
+        existing: ExistingRecord,
+        credentials: dict[str, str],
+    ) -> UpstreamResult:
+        """Delete an existing DNS record. (Stub - to be implemented in Stage 2.4)."""
+        raise NotImplementedError("delete_record will be implemented in Stage 2.4")
+
+    # =========================================================================
+    # Legacy Interface
+    # =========================================================================
 
     async def update_record(
         self,
