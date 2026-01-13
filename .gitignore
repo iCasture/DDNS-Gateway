@@ -1,10 +1,11 @@
 # # # # # # #
-# Config, Log, Temp Files
+# Config, Log, Data, Temp Files
 # # # # # # #
 
 /config.toml
 /temp/
-/log/
+/data/
+/logs/
 *.log
 
 # # # # # # #

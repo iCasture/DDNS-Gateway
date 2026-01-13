@@ -6,6 +6,7 @@ This module provides the command-line interface for starting the server.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import uvicorn
@@ -29,6 +30,15 @@ def main() -> None:
         sys.exit(1)
 
     setup_logging(config.logging)
+
+    # Warn if binding to all interfaces
+    if config.server.host == "0.0.0.0":  # noqa: S104
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            'Binding to "0.0.0.0" exposes the service to all network interfaces. '
+            "This is a security risk if the service is not behind a reverse proxy. "
+            'Consider using "127.0.0.1" for local-only access.',
+        )
 
     # Inject the loaded configuration into the server module to prevent
     # re-parsing arguments when the app starts.

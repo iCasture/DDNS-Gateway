@@ -83,12 +83,12 @@ class ServerConfig(BaseModel):
     Attributes
     ----------
     host : str
-        Host address to bind to.
+        Host address to bind to. Default is 127.0.0.1 for security.
     port : int
         Port number to listen on.
     """
 
-    host: str = "0.0.0.0"  # noqa: S104
+    host: str = "127.0.0.1"
     port: int = 38080
 
 
@@ -163,7 +163,7 @@ class LoggingConfig(BaseModel):
 
     level: str = "INFO"
     file_enabled: bool = False
-    file_path: str = "/var/log/ddns-gateway.log"
+    file_path: str = "./logs/ddns-gateway.log"
 
     @property
     def file_path_as_path(self) -> Path:
@@ -191,6 +191,91 @@ class HealthConfig(BaseModel):
     enabled: bool = False
 
 
+class DedupePersistConfig(BaseModel):
+    """
+    Dedupe cache persistence configuration.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether to persist cache to SQLite.
+    path : str
+        SQLite file path.
+    flush_interval_seconds : int
+        How often to flush cache to SQLite.
+    flush_on_startup : bool
+        Whether to flush immediately after loading on startup.
+    """
+
+    enabled: bool = False
+    path: str = "./data/dedupe.db"
+    flush_interval_seconds: int = 600
+    flush_on_startup: bool = True
+
+
+class DedupeConfig(BaseModel):
+    """
+    Request deduplication configuration.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether deduplication is enabled.
+    window_seconds : int
+        Time window in seconds for deduplication.
+    max_entries : int
+        Maximum number of cache entries.
+    persist : DedupePersistConfig
+        Persistence configuration.
+    """
+
+    enabled: bool = True
+    window_seconds: int = 300
+    max_entries: int = 1000
+    persist: DedupePersistConfig = DedupePersistConfig()
+
+
+class RetryConfig(BaseModel):
+    """
+    Automatic retry configuration for upstream API calls.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether automatic retry is enabled.
+    max_attempts : int
+        Maximum number of attempts (including first).
+    base_delay_ms : int
+        Base delay in milliseconds.
+    max_delay_ms : int
+        Maximum delay in milliseconds.
+    jitter : bool
+        Whether to add random jitter.
+    on_http_status : list[int]
+        HTTP status codes that trigger retry.
+    """
+
+    enabled: bool = True
+    max_attempts: int = 3
+    base_delay_ms: int = 200
+    max_delay_ms: int = 2000
+    jitter: bool = True
+    on_http_status: list[int] = [429, 500, 502, 503, 504]
+
+
+class ResponseConfig(BaseModel):
+    """
+    Response format configuration.
+
+    Attributes
+    ----------
+    include_debug_info : bool
+        Whether to include debug info (raw input, normalized) in response.
+    """
+
+    include_debug_info: bool = False
+
+
 class Config(BaseModel):
     """
     Application configuration.
@@ -202,11 +287,17 @@ class Config(BaseModel):
     auth : AuthConfig
         Authentication configuration.
     methods : MethodsConfig
-        HTTP methods configuration.
+        HTTP methods configuration (deprecated, will be removed).
     logging : LoggingConfig
         Logging configuration.
     health : HealthConfig
         Health endpoint configuration.
+    dedupe : DedupeConfig
+        Request deduplication configuration.
+    retry : RetryConfig
+        Automatic retry configuration.
+    response : ResponseConfig
+        Response format configuration.
     """
 
     server: ServerConfig = ServerConfig()
@@ -214,6 +305,9 @@ class Config(BaseModel):
     methods: MethodsConfig = MethodsConfig()
     logging: LoggingConfig = LoggingConfig()
     health: HealthConfig = HealthConfig()
+    dedupe: DedupeConfig = DedupeConfig()
+    retry: RetryConfig = RetryConfig()
+    response: ResponseConfig = ResponseConfig()
 
 
 def _format_validation_errors(
@@ -374,52 +468,6 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
     return result
 
 
-def parse_methods_str(value: str) -> MethodsConfig:
-    """
-    Parse methods string from CLI.
-
-    This function is intended to be used as a `type` converter in `argparse`.
-
-    Parameters
-    ----------
-    value : str
-        Comma-separated list of methods (e.g., "get,post").
-
-    Returns
-    -------
-    MethodsConfig
-        Methods configuration.
-
-    Raises
-    ------
-    argparse.ArgumentTypeError
-        If the value contains invalid methods.
-    """
-    if not value:
-        msg = "No methods specified."
-        raise argparse.ArgumentTypeError(msg)
-
-    methods = [m.strip().lower() for m in value.split(",") if m.strip()]
-
-    if not methods:
-        msg = "No methods specified."
-        raise argparse.ArgumentTypeError(msg)
-
-    get_enabled = False
-    post_enabled = False
-
-    for method in methods:
-        if method == "get":
-            get_enabled = True
-        elif method == "post":
-            post_enabled = True
-        else:
-            msg = f'Invalid method: "{method}".'
-            raise argparse.ArgumentTypeError(msg)
-
-    return MethodsConfig(get_enabled=get_enabled, post_enabled=post_enabled)
-
-
 def dict_to_config(data: dict[str, Any]) -> Config:
     """
     Convert a dictionary to a Config object.
@@ -448,6 +496,9 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     """
     Parse command-line arguments.
 
+    Only essential arguments are supported via CLI. Other settings should be
+    configured via the configuration file.
+
     Parameters
     ----------
     args : list[str] | None, optional
@@ -463,108 +514,39 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         description="DDNS Gateway - A DDNS update service for RouterOS",
     )
 
-    # Config arguments
+    # Config file
     parser.add_argument(
+        "-c",
         "--config",
         type=Path,
         default=None,
         help="Path to configuration file (default: config.toml)",
     )
 
-    # Server arguments
+    # Server settings
     parser.add_argument(
+        "-H",
         "--host",
         type=str,
         default=None,
         help="Host address to bind to",
     )
     parser.add_argument(
+        "-p",
         "--port",
         type=int,
         default=None,
         help="Port number to listen on",
     )
 
-    # Auth arguments
-    auth_group = parser.add_mutually_exclusive_group()
-    auth_group.add_argument(
-        "--auth-enabled",
-        action="store_true",
-        dest="auth_enabled",
-        default=None,
-        help="Enable authentication",
-    )
-    auth_group.add_argument(
-        "--auth-disabled",
-        action="store_false",
-        dest="auth_enabled",
-        default=None,
-        help="Disable authentication",
-    )
+    # Logging
     parser.add_argument(
-        "--auth-tokens",
-        nargs="+",
-        action="extend",
-        dest="auth_tokens",
-        default=None,
-        help="Authentication tokens",
-    )
-
-    # Methods arguments
-    parser.add_argument(
-        "--methods",
-        type=parse_methods_str,
-        dest="methods",
-        default=None,
-        help="Enabled HTTP methods (comma-separated, e.g., 'get,post')",
-    )
-
-    # Logging arguments
-    parser.add_argument(
+        "-l",
         "--log-level",
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default=None,
         help="Log level",
-    )
-    log_file_group = parser.add_mutually_exclusive_group()
-    log_file_group.add_argument(
-        "--log-file-enabled",
-        action="store_true",
-        dest="log_file_enabled",
-        default=None,
-        help="Enable logging to file",
-    )
-    log_file_group.add_argument(
-        "--log-file-disabled",
-        action="store_false",
-        dest="log_file_enabled",
-        default=None,
-        help="Disable logging to file",
-    )
-    parser.add_argument(
-        "--log-file-path",
-        type=Path,
-        dest="log_file_path",
-        default=None,
-        help="Path to the log file",
-    )
-
-    # Health endpoint arguments
-    health_group = parser.add_mutually_exclusive_group()
-    health_group.add_argument(
-        "--health-enabled",
-        action="store_true",
-        dest="health_enabled",
-        default=None,
-        help='Enable "/health" endpoint',
-    )
-    health_group.add_argument(
-        "--health-disabled",
-        action="store_false",
-        dest="health_enabled",
-        default=None,
-        help='Disable "/health" endpoint',
     )
 
     return parser.parse_args(args)
@@ -600,7 +582,7 @@ def load_config(args: argparse.Namespace | None = None) -> Config:
     if config_path is not None:
         config_path = config_path.expanduser()
     if config_path is None:
-        default_config = Path("config.toml")
+        default_config = Path("./config.toml")
         if default_config.exists():
             config_path = default_config
 
@@ -625,33 +607,9 @@ def load_config(args: argparse.Namespace | None = None) -> Config:
     if args.port is not None:
         cli_overrides.setdefault("server", {})["port"] = args.port
 
-    # Auth overrides
-    if args.auth_enabled is not None:
-        cli_overrides.setdefault("auth", {})["enabled"] = args.auth_enabled
-    if args.auth_tokens is not None:
-        cli_overrides.setdefault("auth", {})["tokens"] = args.auth_tokens
-
-    # Methods overrides
-    if args.methods is not None:
-        methods_config: MethodsConfig = args.methods
-        cli_overrides.setdefault("methods", {})["get_enabled"] = (
-            methods_config.get_enabled
-        )
-        cli_overrides.setdefault("methods", {})["post_enabled"] = (
-            methods_config.post_enabled
-        )
-
     # Logging overrides
     if args.log_level is not None:
         cli_overrides.setdefault("logging", {})["level"] = args.log_level
-    if args.log_file_enabled is not None:
-        cli_overrides.setdefault("logging", {})["file_enabled"] = args.log_file_enabled
-    if args.log_file_path is not None:
-        cli_overrides.setdefault("logging", {})["file_path"] = str(args.log_file_path)
-
-    # Health overrides
-    if args.health_enabled is not None:
-        cli_overrides.setdefault("health", {})["enabled"] = args.health_enabled
 
     if cli_overrides:
         config_dict = merge_config(config_dict, cli_overrides)
