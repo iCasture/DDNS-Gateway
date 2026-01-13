@@ -7,12 +7,21 @@ from pydantic import ValidationError
 from starlette import status as st_status
 
 from ddns_gateway.models import (
+    DDNSResponse,
     DNSProvider,
+    EffectiveValues,
+    ErrorCode,
+    ErrorModel,
     ProviderMetadata,
+    RecordInfo,
     RecordType,
     ResponseData,
+    ResponseMeta,
+    ResultInfo,
     UpdateRequest,
     UpdateResponse,
+    UpsertRequest,
+    WarningCode,
     WarningModel,
 )
 
@@ -192,3 +201,190 @@ class TestProviderMetadata:
         assert metadata.request_id is None
         assert metadata.zone_id is None
         assert metadata.extra is None
+
+
+class TestWarningCode:
+    """Tests for WarningCode enum."""
+
+    def test_warning_code_values(self):
+        assert WarningCode.ALI_COMMENT_UPDATE_FAILED == "ALI_COMMENT_UPDATE_FAILED"
+        assert WarningCode.CF_PROXIED_IGNORED_FOR_TXT == "CF_PROXIED_IGNORED_FOR_TXT"
+        assert WarningCode.DEDUPE_HIT_SHORTCIRCUIT == "DEDUPE_HIT_SHORTCIRCUIT"
+
+    def test_warning_code_from_string(self):
+        assert (
+            WarningCode("QUERY_IGNORED_DUE_TO_BODY")
+            == WarningCode.QUERY_IGNORED_DUE_TO_BODY
+        )
+
+
+class TestErrorCode:
+    """Tests for ErrorCode enum."""
+
+    def test_error_code_values(self):
+        assert ErrorCode.VALIDATION_ERROR == "VALIDATION_ERROR"
+        assert ErrorCode.INVALID_PROVIDER == "INVALID_PROVIDER"
+        assert ErrorCode.UPSTREAM_API_ERROR == "UPSTREAM_API_ERROR"
+        assert ErrorCode.INTERNAL_ERROR == "INTERNAL_ERROR"
+
+    def test_error_code_from_string(self):
+        assert ErrorCode("ZONE_NOT_FOUND") == ErrorCode.ZONE_NOT_FOUND
+
+
+class TestErrorModel:
+    """Tests for ErrorModel."""
+
+    def test_error_model_basic(self):
+        error = ErrorModel(
+            code=ErrorCode.INVALID_IP_ADDRESS,
+            message="Invalid IPv4 address format",
+        )
+        assert error.code == "INVALID_IP_ADDRESS"
+        assert error.message == "Invalid IPv4 address format"
+        assert error.field is None
+        assert error.details is None
+
+    def test_error_model_with_field(self):
+        error = ErrorModel(
+            code=ErrorCode.VALIDATION_ERROR,
+            message="Field is required",
+            field="value",
+        )
+        assert error.field == "value"
+
+    def test_error_model_with_details(self):
+        error = ErrorModel(
+            code=ErrorCode.UPSTREAM_API_ERROR,
+            message="Cloudflare API error",
+            details={
+                "http_status": 400,
+                "raw_response": {"success": False, "errors": []},
+            },
+        )
+        assert error.details is not None
+        assert error.details["http_status"] == 400  # noqa: PLR2004
+
+
+class TestUpsertRequest:
+    """Tests for UpsertRequest model."""
+
+    def test_valid_upsert_request(self):
+        request = UpsertRequest(value="1.2.3.4")
+        assert request.value == "1.2.3.4"
+        assert request.ttl is None
+        assert request.comment is None
+        assert request.proxied is None
+
+    def test_upsert_request_with_all_fields(self):
+        request = UpsertRequest(
+            value="1.2.3.4",
+            ttl=600,
+            comment="DDNS record",
+            proxied=True,
+        )
+        assert request.value == "1.2.3.4"
+        assert request.ttl == 600  # noqa: PLR2004
+        assert request.comment == "DDNS record"
+        assert request.proxied is True
+
+    def test_upsert_request_invalid_ttl(self):
+        with pytest.raises(ValidationError):
+            UpsertRequest(value="1.2.3.4", ttl=0)
+
+    def test_upsert_request_empty_value(self):
+        with pytest.raises(ValidationError):
+            UpsertRequest(value="")
+
+
+class TestDDNSResponse:
+    """Tests for DDNSResponse model."""
+
+    def test_success_response(self):
+        record = RecordInfo(zone="example.com", type="A", name="home")
+        result = ResultInfo(
+            effective=EffectiveValues(value="1.2.3.4", ttl=600),
+        )
+        response = DDNSResponse.success(
+            action="created",
+            provider="cloudflare",
+            record=record,
+            result=result,
+        )
+        assert response.status == "success"
+        assert response.action == "created"
+        assert response.upstream_called is True
+        assert response.provider == "cloudflare"
+        assert response.record.zone == "example.com"
+        assert response.errors == []
+        assert response.meta.request_id is not None
+
+    def test_success_response_deduped(self):
+        record = RecordInfo(zone="example.com", type="A", name="home")
+        response = DDNSResponse.success(
+            action="deduped",
+            provider="cloudflare",
+            record=record,
+            upstream_called=False,
+        )
+        assert response.action == "deduped"
+        assert response.upstream_called is False
+
+    def test_error_response(self):
+        record = RecordInfo(zone="example.com", type="A", name="home")
+        errors = [
+            ErrorModel(
+                code=ErrorCode.ZONE_NOT_FOUND,
+                message="Zone not found",
+            ),
+        ]
+        response = DDNSResponse.error(
+            errors=errors,
+            provider="cloudflare",
+            record=record,
+        )
+        assert response.status == "error"
+        assert response.action is None
+        assert response.upstream_called is False
+        assert len(response.errors) == 1
+        assert response.errors[0].code == "ZONE_NOT_FOUND"
+
+    def test_to_plain_text(self):
+        record = RecordInfo(zone="example.com", type="A", name="home")
+        response = DDNSResponse.success(
+            action="updated",
+            provider="cloudflare",
+            record=record,
+            upstream_called=True,
+        )
+        text = response.to_plain_text()
+        assert "status=success" in text
+        assert "action=updated" in text
+        assert "upstream_called=true" in text
+
+    def test_response_with_warnings(self):
+        record = RecordInfo(zone="example.com", type="A", name="home")
+        warnings = [
+            WarningModel(
+                code=WarningCode.QUERY_IGNORED_DUE_TO_BODY,
+                message="Query parameters ignored",
+            ),
+        ]
+        response = DDNSResponse.success(
+            action="created",
+            provider="cloudflare",
+            record=record,
+            warnings=warnings,
+        )
+        assert len(response.warnings) == 1
+        assert response.warnings[0].code == "QUERY_IGNORED_DUE_TO_BODY"
+
+
+class TestResponseMeta:
+    """Tests for ResponseMeta model."""
+
+    def test_default_values(self):
+        meta = ResponseMeta()
+        assert meta.request_id is not None
+        assert len(meta.request_id) == 36  # UUID format  # noqa: PLR2004
+        assert meta.timestamp is not None
+        assert meta.dedupe is None
