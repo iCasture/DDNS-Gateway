@@ -16,6 +16,37 @@ if TYPE_CHECKING:
     from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 
+class ProviderError(Exception):
+    """
+    Exception raised when a provider operation fails.
+
+    This exception is used for errors that should propagate up to callers,
+    such as missing credentials, zone not found, or multiple records found.
+
+    Attributes
+    ----------
+    message : str
+        Human-readable error message.
+    code : str | None
+        Optional machine-readable error code.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        """
+        Initialize a ProviderError.
+
+        Parameters
+        ----------
+        message : str
+            Error message.
+        code : str | None, optional
+            Error code.
+        """
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 class ProviderResult:
     """
     Result of a provider operation (legacy).
