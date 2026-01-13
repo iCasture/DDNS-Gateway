@@ -16,12 +16,14 @@ from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.dnspod.v20210323 import dnspod_client_async, models
 
-from ddns_gateway.models import RecordType
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderResult
+from ddns_gateway.normalize import comments_equal, normalize_upstream_value
+from ddns_gateway.providers.base import BaseDNSProvider, ProviderError, ProviderResult
 from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
 
 if TYPE_CHECKING:
     from typing import Any, Final
+
+    from ddns_gateway.models import RecordType
 
 
 # Tencent Cloud DNSPod endpoint
@@ -86,8 +88,64 @@ class TencentProvider(BaseDNSProvider):
         record_type: RecordType,
         credentials: dict[str, str],
     ) -> ExistingRecord | None:
-        """Find an existing DNS record. (Stub - to be implemented in Stage 2.5)."""
-        raise NotImplementedError("find_record will be implemented in Stage 2.5")
+        """
+        Find an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        record : str
+            The host record name (normalized).
+        record_type : RecordType
+            The record type.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        ExistingRecord | None
+            The existing record if found, None otherwise.
+
+        Raises
+        ------
+        ProviderError
+            If multiple records are found or API error occurs.
+        """
+        secret_id = credentials.get("id")
+        secret_key = credentials.get("secret")
+
+        if not secret_id or not secret_key:
+            msg = "Missing required credentials: id and secret"
+            raise ProviderError(msg)
+
+        client = self._create_client(secret_id, secret_key)
+        records = await self._describe_records(client, zone, record, record_type)
+
+        if records is None:
+            msg = "Failed to query DNS records from Tencent API"
+            raise ProviderError(msg)
+
+        if len(records) == 0:
+            return None
+
+        if len(records) > 1:
+            msg = f"Multiple records found for {record}.{zone} ({record_type.value}), manual resolution required"
+            raise ProviderError(msg)
+
+        raw = records[0]
+        return ExistingRecord(
+            record_id=str(raw.get("record_id", "")),
+            zone_id=None,  # Tencent does not use zone_id
+            value=normalize_upstream_value(
+                str(raw.get("value", "")),
+                record_type.value,
+            ),
+            ttl=int(raw.get("ttl", 0)),
+            comment=raw.get("remark"),
+            proxied=None,  # Not supported by Tencent
+            raw=raw,
+        )
 
     async def create_record(
         self,
@@ -97,8 +155,60 @@ class TencentProvider(BaseDNSProvider):
         desired: DesiredState,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Create a new DNS record. (Stub - to be implemented in Stage 2.5)."""
-        raise NotImplementedError("create_record will be implemented in Stage 2.5")
+        """
+        Create a new DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized).
+        record : str
+            The host record name (normalized).
+        record_type : RecordType
+            The record type.
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the create operation.
+        """
+        secret_id = credentials.get("id")
+        secret_key = credentials.get("secret")
+
+        if not secret_id or not secret_key:
+            return UpstreamResult(
+                success=False,
+                action="created",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(secret_id, secret_key)
+
+        # Delegate to legacy _create_record helper
+        result = await self._create_record(
+            client,
+            zone,
+            record,
+            record_type,
+            desired.value,
+            desired.ttl,
+            desired.comment,
+        )
+
+        # Convert ProviderResult to UpstreamResult
+        return UpstreamResult(
+            success=result.success,
+            action=result.action or "created",
+            message=result.message,
+            record_id=result.record_id,
+            zone_id=None,
+            extra={"request_id": result.request_id} if result.request_id else None,
+            warnings=result.warnings,
+        )
 
     async def update_record_v2(
         self,
@@ -107,8 +217,97 @@ class TencentProvider(BaseDNSProvider):
         desired: DesiredState,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Update an existing DNS record. (Stub - to be implemented in Stage 2.5)."""
-        raise NotImplementedError("update_record_v2 will be implemented in Stage 2.5")
+        """
+        Update an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized). Required by Tencent API.
+        existing : ExistingRecord
+            The existing record to update.
+        desired : DesiredState
+            The desired state for the record.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the update operation.
+        """
+        secret_id = credentials.get("id")
+        secret_key = credentials.get("secret")
+
+        if not secret_id or not secret_key:
+            return UpstreamResult(
+                success=False,
+                action="updated",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(secret_id, secret_key)
+
+        # Get record type from raw data
+        record_type = existing.raw.get("type", "")
+
+        # Normalize desired value for comparison
+        desired_value_normalized = normalize_upstream_value(desired.value, record_type)
+
+        # Check if update is needed
+        value_changed = existing.value != desired_value_normalized
+        ttl_changed = desired.ttl is not None and existing.ttl != desired.ttl
+        comment_changed = desired.comment is not None and not comments_equal(
+            existing.comment,
+            desired.comment,
+        )
+
+        if not value_changed and not ttl_changed and not comment_changed:
+            return UpstreamResult(
+                success=True,
+                action="nochange",
+                message=f"DNS record unchanged for {existing.raw.get('name', '')}",
+                record_id=existing.record_id,
+                zone_id=None,
+            )
+
+        try:
+            request = models.ModifyRecordRequest()
+            request.Domain = zone
+            request.RecordId = int(existing.record_id)
+            request.SubDomain = existing.raw.get("name", "")
+            request.RecordType = record_type
+            request.RecordLine = existing.raw.get("line", "默认")
+            request.Value = desired.value
+            request.TTL = desired.ttl
+            if desired.comment is not None:
+                request.Remark = desired.comment
+
+            response = await client.ModifyRecord(request)
+            request_id = response.RequestId
+
+            logger.debug("[tencent] ModifyRecord -> RequestId: %s", request_id)
+
+            return UpstreamResult(
+                success=True,
+                action="updated",
+                message=f"DNS record updated for {existing.raw.get('name', '')}.{zone}",
+                record_id=existing.record_id,
+                zone_id=None,
+                previous_value=existing.value if value_changed else None,
+                extra={"request_id": request_id} if request_id else None,
+            )
+
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
+                "[tencent: ModifyRecord] Failed to update: '%s'",
+                e,
+            )
+            return UpstreamResult(
+                success=False,
+                action="updated",
+                message=f"Failed to update record: {e}",
+            )
 
     async def delete_record(
         self,
@@ -116,8 +315,64 @@ class TencentProvider(BaseDNSProvider):
         existing: ExistingRecord,
         credentials: dict[str, str],
     ) -> UpstreamResult:
-        """Delete an existing DNS record. (Stub - to be implemented in Stage 2.5)."""
-        raise NotImplementedError("delete_record will be implemented in Stage 2.5")
+        """
+        Delete an existing DNS record.
+
+        Parameters
+        ----------
+        zone : str
+            The DNS zone (normalized). Required by Tencent API.
+        existing : ExistingRecord
+            The existing record to delete.
+        credentials : dict[str, str]
+            Must contain "id" and "secret".
+
+        Returns
+        -------
+        UpstreamResult
+            The result of the delete operation.
+        """
+        secret_id = credentials.get("id")
+        secret_key = credentials.get("secret")
+
+        if not secret_id or not secret_key:
+            return UpstreamResult(
+                success=False,
+                action="deleted",
+                message="Missing required credentials: id and secret",
+            )
+
+        client = self._create_client(secret_id, secret_key)
+
+        try:
+            request = models.DeleteRecordRequest()
+            request.Domain = zone
+            request.RecordId = int(existing.record_id)
+
+            response = await client.DeleteRecord(request)
+            request_id = response.RequestId
+
+            logger.debug("[tencent] DeleteRecord -> RequestId: %s", request_id)
+
+            return UpstreamResult(
+                success=True,
+                action="deleted",
+                message=f"DNS record deleted for {existing.raw.get('name', '')}.{zone}",
+                record_id=existing.record_id,
+                zone_id=None,
+                extra={"request_id": request_id} if request_id else None,
+            )
+
+        except Exception as e:  # noqa: BLE001
+            logger.error(  # noqa: TRY400
+                "[tencent: DeleteRecord] Failed to delete: '%s'",
+                e,
+            )
+            return UpstreamResult(
+                success=False,
+                action="deleted",
+                message=f"Failed to delete record: {e}",
+            )
 
     # =========================================================================
     # Legacy Interface
@@ -168,7 +423,7 @@ class TencentProvider(BaseDNSProvider):
             )
 
         # Normalize record name for DNSPod (@ for root, others as-is)
-        sub = "@" if record == "@" or record == "" else record
+        sub = "@" if record in {"@", ""} else record
 
         try:
             async with self._create_client(secret_id, secret_key) as client:
@@ -221,8 +476,8 @@ class TencentProvider(BaseDNSProvider):
                     ),
                 )
 
-        except Exception as e:
-            logger.error("[tencent] Failed to query/manipulate records: '%s'", e)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[tencent] Failed to query/manipulate records: '%s'", e)  # noqa: TRY400
             return ProviderResult(
                 success=False,
                 message=f"Tencent Cloud DNSPod error: {e}",
@@ -288,13 +543,13 @@ class TencentProvider(BaseDNSProvider):
                 if r.Name == record_name and r.Type == record_type.value
             ]
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # Handle "no records found" as empty list, not error
             error_msg = str(e)
             if "ResourceNotFound.NoDataOfRecord" in error_msg:
                 logger.debug("[tencent] No records found (not an error)")
                 return []
-            logger.error(
+            logger.error(  # noqa: TRY400
                 "[tencent: DescribeRecordList] Failed to describe record list: '%s'",
                 e,
             )
@@ -364,8 +619,8 @@ class TencentProvider(BaseDNSProvider):
                 request_id=request_id,
             )
 
-        except Exception as e:
-            logger.error("[tencent: CreateRecord] Failed to create record: '%s'", e)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[tencent: CreateRecord] Failed to create record: '%s'", e)  # noqa: TRY400
             return ProviderResult(
                 success=False,
                 message=f"Failed to create record: {e}",
@@ -452,8 +707,8 @@ class TencentProvider(BaseDNSProvider):
                 previous_value=current_value if value_changed else None,
             )
 
-        except Exception as e:
-            logger.error("[tencent: ModifyRecord] Failed to update record: '%s'", e)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[tencent: ModifyRecord] Failed to update record: '%s'", e)  # noqa: TRY400
             return ProviderResult(
                 success=False,
                 message=f"Failed to update record: {e}",
