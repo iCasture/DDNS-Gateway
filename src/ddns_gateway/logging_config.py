@@ -30,7 +30,8 @@ SENSITIVE_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
     # Keep first 6 characters, mask the rest
     (
         re.compile(
-            r"((?:Authorization:\s*)?Bearer\s+)(.{0,6})([^\s\"']*)", re.IGNORECASE,
+            r"((?:Authorization:\s*)?Bearer\s+)(.{0,6})([^\s\"']*)",
+            re.IGNORECASE,
         ),
         r"\1\2******",
     ),
@@ -78,6 +79,11 @@ SENSITIVE_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
 # Constants
 LOG_FORMAT: Final[str] = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
 DATE_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
+
+# Automatically determine the root logger name from the package name
+# This ensures that if the folder is renamed, logging configuration follows suit.
+# Fallback to "ddns_gateway" if __package__ is None (e.g. run as script).
+ROOT_LOGGER_NAME: Final[str] = __package__ or "ddns_gateway"
 
 
 class SensitiveFilter(logging.Filter):
@@ -193,7 +199,7 @@ def setup_logging(config: LoggingConfig) -> None:
         Logging configuration.
     """
     # Get the root logger for the package
-    logger = logging.getLogger("ddns_gateway")
+    logger = logging.getLogger(ROOT_LOGGER_NAME)
     logger.setLevel(getattr(logging, config.level.upper(), logging.INFO))
 
     # Clear any existing handlers
@@ -275,7 +281,7 @@ def build_uvicorn_log_config(config: LoggingConfig) -> dict:
             # Test if we can write to the file
             log_path.touch(exist_ok=True)
         except OSError as e:
-            logger = logging.getLogger("ddns_gateway")
+            logger = logging.getLogger(ROOT_LOGGER_NAME)
             logger.critical("Failed to create log file: %s", e)
             sys.exit(1)
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import tempfile
 from pathlib import Path
 
@@ -11,16 +10,19 @@ import pytest
 from ddns_gateway.config import (
     AuthConfig,
     ConfigValidationError,
+    DedupeConfig,
+    DedupePersistConfig,
     HealthConfig,
     LoggingConfig,
     MethodsConfig,
+    ResponseConfig,
+    RetryConfig,
     ServerConfig,
     dict_to_config,
     load_config,
     load_config_from_file,
     merge_config,
     parse_args,
-    parse_methods_str,
     validate_config_dict,
 )
 
@@ -30,7 +32,7 @@ class TestServerConfig:
 
     def test_default_values(self):
         config = ServerConfig()
-        assert config.host == "0.0.0.0"
+        assert config.host == "127.0.0.1"
         assert config.port == 38080
 
     def test_custom_values(self):
@@ -70,6 +72,56 @@ class TestHealthConfig:
         assert config.enabled is False
 
 
+class TestDedupeConfig:
+    """Tests for DedupeConfig."""
+
+    def test_default_values(self):
+        config = DedupeConfig()
+        assert config.enabled is True
+        assert config.window_seconds == 300
+        assert config.max_entries == 1000
+
+    def test_persist_defaults(self):
+        config = DedupeConfig()
+        assert config.persist.enabled is False
+        assert config.persist.path == "./data/dedupe.db"
+        assert config.persist.flush_interval_seconds == 600
+        assert config.persist.flush_on_startup is True
+
+    def test_persist_custom(self):
+        persist = DedupePersistConfig(
+            enabled=True,
+            path="/custom/path.db",
+            flush_interval_seconds=300,
+            flush_on_startup=False,
+        )
+        config = DedupeConfig(persist=persist)
+        assert config.persist.enabled is True
+        assert config.persist.path == "/custom/path.db"
+
+
+class TestRetryConfig:
+    """Tests for RetryConfig."""
+
+    def test_default_values(self):
+        config = RetryConfig()
+        assert config.enabled is True
+        assert config.max_attempts == 3
+        assert config.base_delay_ms == 200
+        assert config.max_delay_ms == 2000
+        assert config.jitter is True
+        assert 429 in config.on_http_status
+        assert 500 in config.on_http_status
+
+
+class TestResponseConfig:
+    """Tests for ResponseConfig."""
+
+    def test_default_values(self):
+        config = ResponseConfig()
+        assert config.include_debug_info is False
+
+
 class TestLoggingConfig:
     """Tests for LoggingConfig."""
 
@@ -77,7 +129,7 @@ class TestLoggingConfig:
         config = LoggingConfig()
         assert config.level == "INFO"
         assert config.file_enabled is False
-        assert config.file_path == "/var/log/ddns-gateway.log"
+        assert config.file_path == "./logs/ddns-gateway.log"
 
 
 class TestMergeConfig:
@@ -90,10 +142,10 @@ class TestMergeConfig:
         assert result == {"a": 1, "b": 3, "c": 4}
 
     def test_nested_merge(self):
-        base = {"server": {"host": "0.0.0.0", "port": 38080}}
+        base = {"server": {"host": "127.0.0.1", "port": 38080}}
         override = {"server": {"port": 9000}}
         result = merge_config(base, override)
-        assert result == {"server": {"host": "0.0.0.0", "port": 9000}}
+        assert result == {"server": {"host": "127.0.0.1", "port": 9000}}
 
 
 class TestDictToConfig:
@@ -101,7 +153,7 @@ class TestDictToConfig:
 
     def test_empty_dict(self):
         config = dict_to_config({})
-        assert config.server.host == "0.0.0.0"
+        assert config.server.host == "127.0.0.1"
         assert config.server.port == 38080
         assert config.auth.enabled is False
         assert config.health.enabled is False
@@ -153,53 +205,19 @@ tokens = ["token1", "token2"]
             config_path.unlink()
 
 
-class TestParseMethodsStr:
-    """Tests for parse_methods_str function."""
-
-    def test_parse_valid_methods(self):
-        config = parse_methods_str("get,post")
-        assert config
-        assert config.get_enabled
-        assert config.post_enabled
-
-        config = parse_methods_str("GET")
-        assert config
-        assert config.get_enabled
-        assert not config.post_enabled
-
-        config = parse_methods_str("post")
-        assert config
-        assert not config.get_enabled
-        assert config.post_enabled
-
-    def test_parse_invalid_methods(self):
-        with pytest.raises(argparse.ArgumentTypeError):
-            parse_methods_str("invalid")
-
-        with pytest.raises(argparse.ArgumentTypeError):
-            parse_methods_str("get,invalid")
-
-    def test_parse_empty(self):
-        with pytest.raises(argparse.ArgumentTypeError):
-            parse_methods_str("")
-
-
 class TestParseArgs:
     """Tests for parse_args function."""
 
     def test_default_args(self):
+        """Test that all args default to None."""
         args = parse_args([])
         assert args.config is None
         assert args.host is None
         assert args.port is None
         assert args.log_level is None
-        assert args.auth_enabled is None
-        assert args.auth_tokens is None
-        assert args.methods is None
-        assert args.log_file_enabled is None
-        assert args.log_file_path is None
 
     def test_custom_args(self):
+        """Test parsing custom arguments."""
         args = parse_args(
             ["--host", "127.0.0.1", "--port", "9000", "--log-level", "DEBUG"],
         )
@@ -208,80 +226,48 @@ class TestParseArgs:
         assert args.log_level == "DEBUG"
 
     def test_config_path(self):
+        """Test parsing config path with short option."""
         args = parse_args(["--config", "/path/to/config.toml"])
         assert args.config == Path("/path/to/config.toml")
 
-    def test_auth_enabled_disabled(self):
-        args = parse_args(["--auth-enabled"])
-        assert args.auth_enabled is True
+        args = parse_args(["-c", "/path/to/config.toml"])
+        assert args.config == Path("/path/to/config.toml")
 
-        args = parse_args(["--auth-disabled"])
-        assert args.auth_enabled is False
-
-    def test_auth_tokens(self):
-        # Test basic list
-        args = parse_args(["--auth-tokens", "a", "b"])
-        assert args.auth_tokens == ["a", "b"]
-
-        # Test extend
-        args = parse_args(["--auth-tokens", "a", "--auth-tokens", "b"])
-        assert args.auth_tokens == ["a", "b"]
-
-        # Test with subsequent flags
-        try:
-            # Need to use a full parser test to verify flag termination properly
-            # argparse behavior is such that the next flag terminates nargs='+'
-            args = parse_args(["--auth-tokens", "a", "b", "--log-level", "INFO"])
-            assert args.auth_tokens == ["a", "b"]
-            assert args.log_level == "INFO"
-        except SystemExit:
-            pytest.fail("Argument parsing failed on flag boundary")
-
-    def test_methods(self):
-        args = parse_args(["--methods", "get,post"])
-        assert args.methods.get_enabled
-        assert args.methods.post_enabled
-
-        args = parse_args(["--methods", "post"])
-        assert not args.methods.get_enabled
-        assert args.methods.post_enabled
-
-    def test_log_file_enabled_disabled(self):
-        args = parse_args(["--log-file-enabled"])
-        assert args.log_file_enabled is True
-
-        args = parse_args(["--log-file-disabled"])
-        assert args.log_file_enabled is False
-
-    def test_log_file_path(self):
-        args = parse_args(["--log-file-path", "/custom/log.path"])
-        assert isinstance(args.log_file_path, Path)
-        assert args.log_file_path == Path("/custom/log.path")
+    def test_short_options(self):
+        """Test all short options work correctly."""
+        args = parse_args(
+            [
+                "-c",
+                "config.toml",
+                "-H",
+                "127.0.0.1",
+                "-p",
+                "9000",
+                "-l",
+                "DEBUG",
+            ],
+        )
+        assert args.config == Path("config.toml")
+        assert args.host == "127.0.0.1"
+        assert args.port == 9000
+        assert args.log_level == "DEBUG"
 
 
 class TestLoadConfigOverrides:
     """Tests for CLI overrides in load_config."""
 
-    def test_auth_override(self):
-        # Create a parsed args object with overrides
-        args = parse_args(["--auth-enabled", "--auth-tokens", "cli_token"])
+    def test_host_port_overrides(self):
+        """Test that host and port CLI args override config."""
+        args = parse_args(["--host", "127.0.0.1", "--port", "9000"])
         config = load_config(args)
-        assert config.auth.enabled is True
-        assert config.auth.tokens == ["cli_token"]
+        assert config.server.host == "127.0.0.1"
+        assert config.server.port == 9000
 
-    def test_methods_override(self):
-        args = parse_args(["--methods", "post"])
+    def test_log_level_override(self):
+        """Test that log level CLI arg overrides config."""
+        args = parse_args(["--log-level", "DEBUG"])
         config = load_config(args)
-        assert config.methods.get_enabled is False
-        assert config.methods.post_enabled is True
-
-    def test_logging_override(self):
-        args = parse_args(
-            ["--log-file-enabled", "--log-file-path", "/tmp/cli.log"],
-        )
-        config = load_config(args)
-        assert config.logging.file_enabled is True
-        assert config.logging.file_path == str(Path("/tmp/cli.log").expanduser())
+        assert config.logging.level == "DEBUG"
 
 
 class TestConfigValidation:
