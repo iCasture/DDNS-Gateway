@@ -35,8 +35,10 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +339,8 @@ class DedupeCache:
 
             if expired:
                 logger.debug(
-                    "[dedupe] Cleanup removed %d expired entries", len(expired)
+                    "[dedupe] Cleanup removed %d expired entries",
+                    len(expired),
                 )
             return len(expired)
 
@@ -570,3 +573,163 @@ def compute_dedupe_key(
     }
     canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode()).hexdigest()
+
+
+def build_deduped_response(
+    entry: DedupeEntry,
+    window_seconds: int,
+) -> dict:
+    """
+    Build a response dict for dedupe cache hit.
+
+    Creates a new response dict from the cached base, overriding:
+    - action -> "deduped"
+    - upstream_called -> False
+    - meta -> fresh (new request_id, timestamp, dedupe.hit=True)
+
+    CACHE POLLUTION WARNING:
+    This function returns a dict that shares nested objects with the cached base.
+    DO NOT modify any nested objects in the returned dict. If you need to modify
+    nested fields, copy them first. See module docstring for safe patterns.
+
+    Parameters
+    ----------
+    entry : DedupeEntry
+        The cached entry.
+    window_seconds : int
+        The dedupe window for meta info.
+
+    Returns
+    -------
+    dict
+        Response dict suitable for converting to DDNSResponse.
+        The caller should construct DDNSResponse from this.
+    """
+    base = entry.base
+
+    # Build fresh meta (these are always new, never cached)
+    fresh_meta = {
+        "request_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(UTC).isoformat(),
+        "dedupe": {
+            "hit": True,
+            "window_sec": window_seconds,
+        },
+    }
+
+    # Build result info (read-only from cache, do not modify!)
+    result_info = None
+    if base.record_id is not None or base.value:
+        effective = {
+            "value": base.value,
+            "ttl": base.ttl,
+            "comment": base.comment,
+            "proxied": base.proxied,
+        }
+        upstream = None
+        if base.record_id:
+            upstream = {
+                "record_id": base.record_id,
+                "zone_id": base.zone_id,
+            }
+        result_info = {
+            "effective": effective,
+            "upstream": upstream,
+            "previous_value": base.previous_value,
+        }
+
+    # Build record info (read-only from cache)
+    record_info = {
+        "zone": base.zone,
+        "type": base.record_type,
+        "name": base.record,
+    }
+
+    return {
+        "status": base.status,
+        "action": "deduped",  # Override: NOT original_action
+        "upstream_called": False,  # Override: cache hit means no upstream
+        "provider": base.provider,
+        "record": record_info,
+        "result": result_info,
+        "warnings": list(base.warnings),  # Convert tuple to list (new object)
+        "errors": [],
+        "meta": fresh_meta,
+        "debug": None,
+    }
+
+
+def create_cached_base(
+    *,
+    status: str,
+    action: str,
+    provider: str,
+    zone: str,
+    record_type: str,
+    record: str,
+    record_id: str | None,
+    zone_id: str | None,
+    value: str,
+    ttl: int | None,
+    comment: str | None,
+    proxied: bool | None,
+    previous_value: str | None,
+    warnings: list | tuple,
+) -> CachedResponseBase:
+    """
+    Create a CachedResponseBase from service layer values.
+
+    Called after successful upstream operation to store in cache.
+
+    Parameters
+    ----------
+    status : str
+        "success" or "error"
+    action : str
+        The original action: "created", "updated", "nochange", "deleted"
+    provider : str
+        Provider name (lowercase)
+    zone : str
+        Normalized zone
+    record_type : str
+        Record type (uppercase)
+    record : str
+        Normalized record name
+    record_id : str | None
+        Upstream record ID
+    zone_id : str | None
+        Upstream zone ID (Cloudflare only)
+    value : str
+        Effective value
+    ttl : int | None
+        Effective TTL
+    comment : str | None
+        Effective comment
+    proxied : bool | None
+        Effective proxied (Cloudflare only)
+    previous_value : str | None
+        Previous value if updated
+    warnings : list | tuple
+        Warnings from upstream call
+
+    Returns
+    -------
+    CachedResponseBase
+        Immutable cached response base.
+    """
+    return CachedResponseBase(
+        status=status,
+        original_action=action,
+        provider=provider,
+        zone=zone,
+        record_type=record_type,
+        record=record,
+        record_id=record_id,
+        zone_id=zone_id,
+        value=value,
+        ttl=ttl,
+        comment=comment,
+        proxied=proxied,
+        previous_value=previous_value,
+        warnings=tuple(warnings),  # Ensure immutable
+    )

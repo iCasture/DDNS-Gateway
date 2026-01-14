@@ -11,8 +11,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ddns_gateway.dedupe import (
+    build_deduped_response,
+    compute_dedupe_key,
+    create_cached_base,
+)
 from ddns_gateway.models import (
     DDNSResponse,
+    DedupeInfo,
     EffectiveValues,
     ErrorCode,
     ErrorModel,
@@ -36,6 +42,7 @@ from ddns_gateway.normalize import (
 from ddns_gateway.types import DesiredState
 
 if TYPE_CHECKING:
+    from ddns_gateway.dedupe import DedupeCache
     from ddns_gateway.providers.base import BaseDNSProvider
 
 
@@ -175,6 +182,8 @@ async def upsert_record_service(
     comment: str | None,
     proxied: bool | None,  # noqa: FBT001
     credentials: dict[str, str],
+    *,
+    dedupe_cache: DedupeCache | None = None,
 ) -> DDNSResponse:
     """
     Upsert (create or update) a DNS record.
@@ -261,9 +270,58 @@ async def upsert_record_service(
         )
 
     # -------------------------------------------------------------------------
-    # Step 2-3: [Reserved] Dedupe cache check
+    # Step 2-3: Dedupe cache check
     # -------------------------------------------------------------------------
-    # TODO: Implement in Stage 4
+    # Import dedupe functions (only when cache is enabled to avoid circular import)
+    dedupe_key: str | None = None
+    if dedupe_cache is not None:
+        dedupe_key = compute_dedupe_key(
+            operation="upsert",
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record=norm_record,
+            value=norm_value,
+            ttl=norm_ttl,
+            comment=norm_comment,
+            proxied=proxied,
+        )
+
+        cached = await dedupe_cache.get(dedupe_key)
+        if cached is not None:
+            logger.debug(
+                "[service: upsert] Dedupe hit: %s...",
+                dedupe_key[:16],
+            )
+            # Build response from cache
+            resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
+            return DDNSResponse(
+                status=resp_dict["status"],
+                action=resp_dict["action"],
+                upstream_called=resp_dict["upstream_called"],
+                provider=resp_dict["provider"],
+                record=RecordInfo(**resp_dict["record"]),
+                result=ResultInfo(
+                    effective=EffectiveValues(**resp_dict["result"]["effective"]),
+                    upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
+                    if resp_dict["result"] and resp_dict["result"].get("upstream")
+                    else None,
+                    previous_value=resp_dict["result"].get("previous_value")
+                    if resp_dict["result"]
+                    else None,
+                )
+                if resp_dict["result"]
+                else None,
+                warnings=resp_dict["warnings"],
+                errors=resp_dict["errors"],
+                meta=ResponseMeta(
+                    dedupe=DedupeInfo(
+                        hit=True,
+                        window_sec=dedupe_cache.window_seconds,
+                    ),
+                ),
+                debug=None,
+            )
 
     # -------------------------------------------------------------------------
     # Step 4: Find existing record
@@ -340,6 +398,28 @@ async def upsert_record_service(
                 warnings=result.warnings,
             )
 
+        # Update dedupe cache
+        if dedupe_cache is not None and dedupe_key is not None:
+            await dedupe_cache.set(
+                dedupe_key,
+                create_cached_base(
+                    status="success",
+                    action="created",
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    record_id=result.record_id,
+                    zone_id=result.zone_id,
+                    value=norm_value,
+                    ttl=norm_ttl,
+                    comment=norm_comment,
+                    proxied=proxied,
+                    previous_value=None,
+                    warnings=result.warnings or [],
+                ),
+            )
+
         return _build_success_response(
             provider=provider,
             zone=norm_zone,
@@ -375,7 +455,28 @@ async def upsert_record_service(
     proxied_changed = proxied is not None and existing.proxied != proxied
 
     if not (value_changed or ttl_changed or comment_changed or proxied_changed):
-        # No change needed
+        # No change needed - still cache this result
+        if dedupe_cache is not None and dedupe_key is not None:
+            await dedupe_cache.set(
+                dedupe_key,
+                create_cached_base(
+                    status="success",
+                    action="unchanged",
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    record_id=existing.record_id,
+                    zone_id=existing.zone_id,
+                    value=existing_value,
+                    ttl=existing.ttl,
+                    comment=existing.comment,
+                    proxied=existing.proxied,
+                    previous_value=None,
+                    warnings=[],
+                ),
+            )
+
         return _build_success_response(
             provider=provider,
             zone=norm_zone,
@@ -432,6 +533,35 @@ async def upsert_record_service(
             warnings=result.warnings,
         )
 
+    # Compute effective values for cache
+    eff_ttl = norm_ttl if norm_ttl is not None else existing.ttl
+    eff_comment = norm_comment if norm_comment is not None else existing.comment
+    eff_proxied = proxied if proxied is not None else existing.proxied
+    eff_record_id = result.record_id or existing.record_id
+    eff_zone_id = result.zone_id or existing.zone_id
+
+    # Update dedupe cache
+    if dedupe_cache is not None and dedupe_key is not None:
+        await dedupe_cache.set(
+            dedupe_key,
+            create_cached_base(
+                status="success",
+                action="updated",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                record_id=eff_record_id,
+                zone_id=eff_zone_id,
+                value=norm_value,
+                ttl=eff_ttl,
+                comment=eff_comment,
+                proxied=eff_proxied,
+                previous_value=existing_value if value_changed else None,
+                warnings=result.warnings or [],
+            ),
+        )
+
     return _build_success_response(
         provider=provider,
         zone=norm_zone,
@@ -441,13 +571,13 @@ async def upsert_record_service(
         upstream_called=True,
         effective=EffectiveValues(
             value=norm_value,
-            ttl=norm_ttl if norm_ttl is not None else existing.ttl,
-            comment=norm_comment if norm_comment is not None else existing.comment,
-            proxied=proxied if proxied is not None else existing.proxied,
+            ttl=eff_ttl,
+            comment=eff_comment,
+            proxied=eff_proxied,
         ),
         upstream=UpstreamInfo(
-            record_id=result.record_id or existing.record_id,
-            zone_id=result.zone_id or existing.zone_id,
+            record_id=eff_record_id,
+            zone_id=eff_zone_id,
             raw_status=result.raw_status,
             http_status=result.http_status,
         ),
@@ -463,6 +593,8 @@ async def delete_record_service(
     record_type: str,
     record: str,
     credentials: dict[str, str],
+    *,
+    dedupe_cache: DedupeCache | None = None,
 ) -> DDNSResponse:
     """
     Delete a DNS record.
@@ -534,9 +666,56 @@ async def delete_record_service(
         )
 
     # -------------------------------------------------------------------------
-    # Step 2-3: [Reserved] Dedupe cache check
+    # Step 2-3: Dedupe cache check
     # -------------------------------------------------------------------------
-    # TODO: Implement in Stage 4
+    dedupe_key: str | None = None
+    if dedupe_cache is not None:
+        dedupe_key = compute_dedupe_key(
+            operation="delete",
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record=norm_record,
+            value=None,  # DELETE: no value
+            ttl=None,  # DELETE: no ttl
+            comment=None,  # DELETE: no comment
+            proxied=None,  # DELETE: no proxied
+        )
+
+        cached = await dedupe_cache.get(dedupe_key)
+        if cached is not None:
+            logger.debug(
+                "[service: delete] Dedupe hit: %s...",
+                dedupe_key[:16],
+            )
+            resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
+            return DDNSResponse(
+                status=resp_dict["status"],
+                action=resp_dict["action"],
+                upstream_called=resp_dict["upstream_called"],
+                provider=resp_dict["provider"],
+                record=RecordInfo(**resp_dict["record"]),
+                result=ResultInfo(
+                    effective=EffectiveValues(**resp_dict["result"]["effective"]),
+                    upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
+                    if resp_dict["result"] and resp_dict["result"].get("upstream")
+                    else None,
+                    previous_value=resp_dict["result"].get("previous_value")
+                    if resp_dict["result"]
+                    else None,
+                )
+                if resp_dict["result"]
+                else None,
+                warnings=resp_dict["warnings"],
+                errors=resp_dict["errors"],
+                meta=ResponseMeta(
+                    dedupe=DedupeInfo(
+                        hit=True,
+                        window_sec=dedupe_cache.window_seconds,
+                    ),
+                ),
+                debug=None,
+            )
 
     # -------------------------------------------------------------------------
     # Step 4: Find existing record
@@ -613,6 +792,28 @@ async def delete_record_service(
                 message=result.message,
             ),
             warnings=result.warnings,
+        )
+
+    # Update dedupe cache
+    if dedupe_cache is not None and dedupe_key is not None:
+        await dedupe_cache.set(
+            dedupe_key,
+            create_cached_base(
+                status="success",
+                action="deleted",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                record_id=result.record_id or existing.record_id,
+                zone_id=result.zone_id or existing.zone_id,
+                value=existing.value,  # Store deleted value for reference
+                ttl=existing.ttl,
+                comment=existing.comment,
+                proxied=existing.proxied,
+                previous_value=None,
+                warnings=result.warnings or [],
+            ),
         )
 
     return _build_success_response(
