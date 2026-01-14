@@ -6,10 +6,6 @@
     enabled = false
     tokens  = [  ]
 
-[methods]
-    get_enabled  = true
-    post_enabled = true
-
 [logging]
     level        = "INFO"
     file_enabled = false
