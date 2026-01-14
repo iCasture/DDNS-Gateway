@@ -8,6 +8,7 @@ Supports PUT (upsert) and DELETE methods with authentication.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated
@@ -21,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from ddns_gateway.config import Config, load_config
 from ddns_gateway.dedupe import DedupeCache
 from ddns_gateway.models import (
+    ERROR_STATUS_MAP,
     DDNSResponse,
     DNSProvider,
     ErrorCode,
@@ -54,6 +56,34 @@ _providers: dict[DNSProvider, BaseDNSProvider] = {
     DNSProvider.ALIYUN: AliyunProvider(),
     DNSProvider.TENCENT: TencentProvider(),
 }
+
+
+def _get_http_status_code(response: DDNSResponse) -> int:
+    """
+    Determine HTTP status code based on response.
+
+    Parameters
+    ----------
+    response : DDNSResponse
+        The response object.
+
+    Returns
+    -------
+    int
+        HTTP status code: 200 for success, appropriate error code otherwise.
+    """
+    if response.status == "success":
+        return 200
+
+    # Check first error code for status mapping
+    if response.errors:
+        first_error = response.errors[0]
+        error_code = first_error.code
+        if error_code in ERROR_STATUS_MAP:
+            return ERROR_STATUS_MAP[error_code]
+
+    # Default to 400 Bad Request for unknown errors
+    return 400
 
 
 def get_config() -> Config:
@@ -189,6 +219,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Store retry config values in app.state for service layer access
     _app.state.request_timeout_sec = _config.retry.request_timeout_sec
+    # Store dedupe config for singleflight
+    _app.state.dedupe_config = _config.dedupe if _config.dedupe.enabled else None
 
     # Dynamically register "/health" endpoint (GET method) if enabled
     if _config.health.enabled:
@@ -658,6 +690,7 @@ async def upsert_ddns_record(
         proxied=final_proxied,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
+        dedupe_config=request.app.state.dedupe_config,
         timeout_sec=request.app.state.request_timeout_sec,
     )
 
@@ -665,12 +698,19 @@ async def upsert_ddns_record(
     if api_warnings:
         response.warnings = api_warnings + response.warnings
 
-    # Determine HTTP status code
-    status_code = (
-        st_status.HTTP_200_OK
-        if response.status == "success"
-        else st_status.HTTP_400_BAD_REQUEST
-    )
+    # Determine HTTP status code using error code mapping
+    status_code = _get_http_status_code(response)
+
+    # Build response headers
+    headers: dict[str, str] = {}
+
+    # Add Retry-After header for singleflight timeout (504)
+    if (
+        status_code == st_status.HTTP_504_GATEWAY_TIMEOUT
+        and request.app.state.dedupe_config
+    ):
+        retry_after = math.ceil(request.app.state.dedupe_config.singleflight_lease_sec)
+        headers["Retry-After"] = str(retry_after)
 
     logger.info(
         "[response] status=%s action=%s upstream_called=%s",
@@ -682,6 +722,7 @@ async def upsert_ddns_record(
     return JSONResponse(
         content=response.model_dump(exclude_none=True),
         status_code=status_code,
+        headers=headers if headers else None,
     )
 
 
@@ -789,15 +830,23 @@ async def delete_ddns_record(
         record=record,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
+        dedupe_config=request.app.state.dedupe_config,
         timeout_sec=request.app.state.request_timeout_sec,
     )
 
-    # Determine HTTP status code
-    status_code = (
-        st_status.HTTP_200_OK
-        if response.status == "success"
-        else st_status.HTTP_400_BAD_REQUEST
-    )
+    # Determine HTTP status code using error code mapping
+    status_code = _get_http_status_code(response)
+
+    # Build response headers
+    headers: dict[str, str] = {}
+
+    # Add Retry-After header for singleflight timeout (504)
+    if (
+        status_code == st_status.HTTP_504_GATEWAY_TIMEOUT
+        and request.app.state.dedupe_config
+    ):
+        retry_after = math.ceil(request.app.state.dedupe_config.singleflight_lease_sec)
+        headers["Retry-After"] = str(retry_after)
 
     logger.info(
         "[response] status=%s action=%s upstream_called=%s",
@@ -809,6 +858,7 @@ async def delete_ddns_record(
     return JSONResponse(
         content=response.model_dump(exclude_none=True),
         status_code=status_code,
+        headers=headers if headers else None,
     )
 
 

@@ -14,6 +14,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from starlette import status as st_status
 
 # =============================================================================
 # Provider & Record Type Enums
@@ -92,6 +93,8 @@ class WarningCode(StrEnum):
         Request was short-circuited due to deduplication cache hit.
     FORMAT_OVERRIDES_ACCEPT : str
         Query format parameter overrides Accept header.
+    RECORD_NOT_FOUND : str
+        Record to be deleted was not found.
     """
 
     ALI_COMMENT_UPDATE_FAILED = "ALI_COMMENT_UPDATE_FAILED"
@@ -102,6 +105,7 @@ class WarningCode(StrEnum):
     DELETE_IGNORES_QUERY_PARAMS = "DELETE_IGNORES_QUERY_PARAMS"
     DEDUPE_HIT_SHORTCIRCUIT = "DEDUPE_HIT_SHORTCIRCUIT"
     FORMAT_OVERRIDES_ACCEPT = "FORMAT_OVERRIDES_ACCEPT"
+    RECORD_NOT_FOUND = "RECORD_NOT_FOUND"
 
 
 class ErrorCode(StrEnum):
@@ -179,6 +183,39 @@ class ErrorCode(StrEnum):
     # Singleflight errors
     SINGLEFLIGHT_WAIT_TIMEOUT = "SINGLEFLIGHT_WAIT_TIMEOUT"
 
+
+# =============================================================================
+# Error Code to HTTP Status Mapping
+# =============================================================================
+
+ERROR_STATUS_MAP: dict[str, int] = {
+    # 400 Bad Request - Validation errors (client error)
+    ErrorCode.VALIDATION_ERROR: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_PROVIDER: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_RECORD_TYPE: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_ZONE_FORMAT: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_RECORD_FORMAT: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_IP_ADDRESS: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.INVALID_DOMAIN_FORMAT: st_status.HTTP_400_BAD_REQUEST,
+    ErrorCode.TXT_VALUE_TOO_LONG: st_status.HTTP_400_BAD_REQUEST,
+    # 401 Unauthorized - Missing auth
+    ErrorCode.MISSING_AUTH_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
+    # 403 Forbidden - Invalid auth
+    ErrorCode.INVALID_AUTH_TOKEN: st_status.HTTP_403_FORBIDDEN,
+    ErrorCode.MISSING_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
+    ErrorCode.INVALID_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
+    # 404 Not Found
+    ErrorCode.ZONE_NOT_FOUND: st_status.HTTP_404_NOT_FOUND,
+    ErrorCode.RECORD_NOT_FOUND: st_status.HTTP_404_NOT_FOUND,
+    # 409 Conflict - Ambiguous
+    ErrorCode.MULTIPLE_RECORDS_FOUND: st_status.HTTP_409_CONFLICT,
+    # 500 Internal Server Error
+    ErrorCode.INTERNAL_ERROR: st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+    # 502 Bad Gateway - Upstream API error
+    ErrorCode.UPSTREAM_API_ERROR: st_status.HTTP_502_BAD_GATEWAY,
+    # 504 Gateway Timeout - Singleflight wait timeout
+    ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT: st_status.HTTP_504_GATEWAY_TIMEOUT,
+}
 
 # =============================================================================
 # Request Models

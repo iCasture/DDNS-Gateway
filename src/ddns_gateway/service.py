@@ -42,6 +42,7 @@ from ddns_gateway.normalize import (
 from ddns_gateway.types import DesiredState
 
 if TYPE_CHECKING:
+    from ddns_gateway.config import DedupeConfig
     from ddns_gateway.dedupe import DedupeCache
     from ddns_gateway.providers.base import BaseDNSProvider
 
@@ -184,6 +185,7 @@ async def upsert_record_service(
     credentials: dict[str, str],
     *,
     dedupe_cache: DedupeCache | None = None,
+    dedupe_config: DedupeConfig | None = None,
     timeout_sec: float | None = None,
 ) -> DDNSResponse:
     """
@@ -329,6 +331,76 @@ async def upsert_record_service(
             )
 
     # -------------------------------------------------------------------------
+    # Step 3.5: Singleflight - Become leader or wait for result
+    # -------------------------------------------------------------------------
+    is_leader = False
+    if dedupe_cache is not None and dedupe_config is not None and dedupe_key:
+        # Try to become leader (mark as in-flight)
+        is_leader = await dedupe_cache.mark_in_flight(
+            dedupe_key,
+            lease_sec=dedupe_config.singleflight_lease_sec,
+        )
+
+        if not is_leader:
+            # Another request is in progress, wait for result
+            logger.debug(
+                "[service: upsert] Singleflight waiting: %s...",
+                dedupe_key[:16],
+            )
+            sf_result = await dedupe_cache.wait_for_result(
+                dedupe_key,
+                wait_timeout_sec=dedupe_config.singleflight_wait_timeout_sec,
+            )
+            if sf_result is not None and sf_result.base is not None:
+                # Leader completed, use their result
+                resp_dict = build_deduped_response(
+                    sf_result, dedupe_cache.window_seconds
+                )
+                return DDNSResponse(
+                    status=resp_dict["status"],
+                    action=resp_dict["action"],
+                    upstream_called=resp_dict["upstream_called"],
+                    provider=resp_dict["provider"],
+                    record=RecordInfo(**resp_dict["record"]),
+                    result=ResultInfo(
+                        effective=EffectiveValues(**resp_dict["result"]["effective"]),
+                        upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
+                        if resp_dict["result"] and resp_dict["result"].get("upstream")
+                        else None,
+                        previous_value=resp_dict["result"].get("previous_value")
+                        if resp_dict["result"]
+                        else None,
+                    )
+                    if resp_dict["result"]
+                    else None,
+                    warnings=resp_dict["warnings"],
+                    errors=resp_dict["errors"],
+                    meta=ResponseMeta(
+                        dedupe=DedupeInfo(
+                            hit=True,
+                            window_sec=dedupe_cache.window_seconds,
+                        ),
+                    ),
+                    debug=None,
+                )
+
+            # Wait timeout - return error (DO NOT retry)
+            logger.warning(
+                "[service: upsert] Singleflight wait timeout: %s...",
+                dedupe_key[:16],
+            )
+            return _build_error_response(
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error=ErrorModel(
+                    code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
+                    message="Another request is in progress, wait timeout exceeded",
+                ),
+            )
+
+    # -------------------------------------------------------------------------
     # Step 4: Find existing record
     # -------------------------------------------------------------------------
     try:
@@ -344,6 +416,9 @@ async def upsert_record_service(
             "[service: upsert] find_record failed: '%s'",
             e,
         )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
@@ -381,6 +456,9 @@ async def upsert_record_service(
                 "[service: upsert] create_record failed: '%s'",
                 e,
             )
+            # Clear singleflight so waiters get notified
+            if dedupe_cache is not None and is_leader and dedupe_key:
+                await dedupe_cache.clear_in_flight(dedupe_key)
             return _build_error_response(
                 provider=provider,
                 zone=norm_zone,
@@ -393,6 +471,9 @@ async def upsert_record_service(
             )
 
         if not result.success:
+            # Clear singleflight so waiters get notified
+            if dedupe_cache is not None and is_leader and dedupe_key:
+                await dedupe_cache.clear_in_flight(dedupe_key)
             return _build_error_response(
                 provider=provider,
                 zone=norm_zone,
@@ -517,6 +598,9 @@ async def upsert_record_service(
             "[service: upsert] update_record failed: '%s'",
             e,
         )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
@@ -529,6 +613,9 @@ async def upsert_record_service(
         )
 
     if not result.success:
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
@@ -603,6 +690,7 @@ async def delete_record_service(
     credentials: dict[str, str],
     *,
     dedupe_cache: DedupeCache | None = None,
+    dedupe_config: DedupeConfig | None = None,
     timeout_sec: float | None = None,
 ) -> DDNSResponse:
     """
@@ -731,6 +819,76 @@ async def delete_record_service(
             )
 
     # -------------------------------------------------------------------------
+    # Step 3.5: Singleflight - Become leader or wait for result
+    # -------------------------------------------------------------------------
+    is_leader = False
+    if dedupe_cache is not None and dedupe_config is not None and dedupe_key:
+        # Try to become leader (mark as in-flight)
+        is_leader = await dedupe_cache.mark_in_flight(
+            dedupe_key,
+            lease_sec=dedupe_config.singleflight_lease_sec,
+        )
+
+        if not is_leader:
+            # Another request is in progress, wait for result
+            logger.debug(
+                "[service: delete] Singleflight waiting: %s...",
+                dedupe_key[:16],
+            )
+            sf_result = await dedupe_cache.wait_for_result(
+                dedupe_key,
+                wait_timeout_sec=dedupe_config.singleflight_wait_timeout_sec,
+            )
+            if sf_result is not None and sf_result.base is not None:
+                # Leader completed, use their result
+                resp_dict = build_deduped_response(
+                    sf_result, dedupe_cache.window_seconds
+                )
+                return DDNSResponse(
+                    status=resp_dict["status"],
+                    action=resp_dict["action"],
+                    upstream_called=resp_dict["upstream_called"],
+                    provider=resp_dict["provider"],
+                    record=RecordInfo(**resp_dict["record"]),
+                    result=ResultInfo(
+                        effective=EffectiveValues(**resp_dict["result"]["effective"]),
+                        upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
+                        if resp_dict["result"] and resp_dict["result"].get("upstream")
+                        else None,
+                        previous_value=resp_dict["result"].get("previous_value")
+                        if resp_dict["result"]
+                        else None,
+                    )
+                    if resp_dict["result"]
+                    else None,
+                    warnings=resp_dict["warnings"],
+                    errors=resp_dict["errors"],
+                    meta=ResponseMeta(
+                        dedupe=DedupeInfo(
+                            hit=True,
+                            window_sec=dedupe_cache.window_seconds,
+                        ),
+                    ),
+                    debug=None,
+                )
+
+            # Wait timeout - return error (DO NOT retry)
+            logger.warning(
+                "[service: delete] Singleflight wait timeout: %s...",
+                dedupe_key[:16],
+            )
+            return _build_error_response(
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error=ErrorModel(
+                    code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
+                    message="Another request is in progress, wait timeout exceeded",
+                ),
+            )
+
+    # -------------------------------------------------------------------------
     # Step 4: Find existing record
     # -------------------------------------------------------------------------
     try:
@@ -746,6 +904,9 @@ async def delete_record_service(
             "[service: delete] find_record failed: '%s'",
             e,
         )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
@@ -785,6 +946,9 @@ async def delete_record_service(
             "[service: delete] delete_record failed: '%s'",
             e,
         )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
@@ -797,6 +961,9 @@ async def delete_record_service(
         )
 
     if not result.success:
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
         return _build_error_response(
             provider=provider,
             zone=norm_zone,
