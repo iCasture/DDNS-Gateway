@@ -7,7 +7,6 @@ import pytest
 from ddns_gateway.normalize import (
     NormalizeError,
     comments_equal,
-    compute_dedupe_key,
     normalize_comment,
     normalize_record,
     normalize_ttl,
@@ -274,91 +273,3 @@ class TestNormalizeUpstreamValue:
 
     def test_empty_string(self):
         assert normalize_upstream_value("", "A") == ""
-
-
-class TestComputeDedupeKey:
-    """Tests for compute_dedupe_key function."""
-
-    def test_same_inputs_same_key(self):
-        key1 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=300,
-            comment="test",
-            proxied=False,
-        )
-        key2 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=300,
-            comment="test",
-            proxied=False,
-        )
-        assert key1 == key2
-
-    def test_different_value_different_key(self):
-        key1 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=300,
-            comment=None,
-            proxied=None,
-        )
-        key2 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="5.6.7.8",
-            ttl=300,
-            comment=None,
-            proxied=None,
-        )
-        assert key1 != key2
-
-    def test_different_ttl_different_key(self):
-        key1 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=300,
-            comment=None,
-            proxied=None,
-        )
-        key2 = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=600,
-            comment=None,
-            proxied=None,
-        )
-        assert key1 != key2
-
-    def test_key_is_sha256_hex(self):
-        key = compute_dedupe_key(
-            provider="cloudflare",
-            zone="example.com",
-            record_type="A",
-            record="home",
-            value="1.2.3.4",
-            ttl=300,
-            comment=None,
-            proxied=None,
-        )
-        # SHA256 hex digest is 64 characters
-        assert len(key) == 64
-        assert all(c in "0123456789abcdef" for c in key)

@@ -8,9 +8,7 @@ comparisons and deduplication.
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
-import json
 import re
 from urllib.parse import unquote
 
@@ -563,62 +561,3 @@ def normalize_upstream_value(value: str, record_type: str) -> str:
 
     # TXT and others: just strip
     return value.strip()
-
-
-# =============================================================================
-# Dedupe Key Computation
-# =============================================================================
-
-
-def compute_dedupe_key(
-    provider: str,
-    zone: str,
-    record_type: str,
-    record: str,
-    value: str,
-    ttl: int | None,
-    comment: str | None,
-    proxied: bool | None,  # noqa: FBT001
-) -> str:
-    """
-    Compute SHA256 hash of canonical request for deduplication.
-
-    All inputs should be pre-normalized.
-    proxied should be None for non-CF or TXT records.
-
-    Parameters
-    ----------
-    provider : str
-        Provider name (lowercase).
-    zone : str
-        Zone name (normalized).
-    record_type : str
-        Record type (uppercase).
-    record : str
-        Record name (normalized).
-    value : str
-        Record value (normalized).
-    ttl : int | None
-        TTL value.
-    comment : str | None
-        Comment (normalized).
-    proxied : bool | None
-        Proxied status (CF only).
-
-    Returns
-    -------
-    str
-        SHA256 hex digest.
-    """
-    canonical = {
-        "provider": provider,
-        "zone": zone,
-        "type": record_type,
-        "record": record,
-        "value": value,
-        "ttl": ttl,
-        "comment": comment,
-        "proxied": proxied,
-    }
-    canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical_json.encode()).hexdigest()
