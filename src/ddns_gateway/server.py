@@ -19,6 +19,7 @@ from starlette import status as st_status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from ddns_gateway.config import Config, load_config
+from ddns_gateway.dedupe import DedupeCache
 from ddns_gateway.models import (
     DDNSResponse,
     DNSProvider,
@@ -170,6 +171,21 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # load it here
     if _config is None:
         _config = load_config()
+
+    # Initialize DedupeCache if enabled
+    if _config.dedupe.enabled:
+        _app.state.dedupe_cache = DedupeCache(
+            max_entries=_config.dedupe.max_entries,
+            window_seconds=_config.dedupe.window_seconds,
+        )
+        logger.info(
+            "[lifespan] DedupeCache initialized (max=%d, window=%ds)",
+            _config.dedupe.max_entries,
+            _config.dedupe.window_seconds,
+        )
+    else:
+        _app.state.dedupe_cache = None
+        logger.info("[lifespan] DedupeCache disabled")
 
     # Dynamically register "/health" endpoint (GET method) if enabled
     if _config.health.enabled:
@@ -638,6 +654,7 @@ async def upsert_ddns_record(
         comment=final_comment,
         proxied=final_proxied,
         credentials=credentials,
+        dedupe_cache=request.app.state.dedupe_cache,
     )
 
     # Merge API-layer warnings into response
@@ -767,6 +784,7 @@ async def delete_ddns_record(
         record_type=record_type,
         record=record,
         credentials=credentials,
+        dedupe_cache=request.app.state.dedupe_cache,
     )
 
     # Determine HTTP status code
