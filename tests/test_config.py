@@ -14,7 +14,6 @@ from ddns_gateway.config import (
     DedupePersistConfig,
     HealthConfig,
     LoggingConfig,
-    MethodsConfig,
     ResponseConfig,
     RetryConfig,
     ServerConfig,
@@ -53,15 +52,6 @@ class TestAuthConfig:
         config = AuthConfig(enabled=True, tokens=["token1", "token2"])
         assert len(config.tokens) == 2
         assert "token1" in config.tokens
-
-
-class TestMethodsConfig:
-    """Tests for MethodsConfig."""
-
-    def test_default_values(self):
-        config = MethodsConfig()
-        assert config.get_enabled is True
-        assert config.post_enabled is True
 
 
 class TestHealthConfig:
@@ -162,7 +152,6 @@ class TestDictToConfig:
         data = {
             "server": {"host": "127.0.0.1", "port": 9000},
             "auth": {"enabled": False, "tokens": ["test"]},
-            "methods": {"get_enabled": True, "post_enabled": False},
             "logging": {
                 "level": "DEBUG",
                 "file_enabled": True,
@@ -174,7 +163,6 @@ class TestDictToConfig:
         assert config.server.port == 9000
         assert config.auth.enabled is False
         assert config.auth.tokens == ["test"]
-        assert config.methods.post_enabled is False
         assert config.logging.level == "DEBUG"
 
 
@@ -277,7 +265,6 @@ class TestConfigValidation:
         data = {
             "server": {"host": "127.0.0.1", "port": 8080},
             "auth": {"enabled": True, "tokens": ["token1"]},
-            "methods": {"get_enabled": True, "post_enabled": False},
             "logging": {"level": "DEBUG", "file_enabled": True},
             "health": {"enabled": True},
         }
@@ -298,15 +285,6 @@ class TestConfigValidation:
         # "8080" can be coerced to int 8080
         data = {"server": {"port": "8080"}}
         validate_config_dict(data)  # Should not raise
-
-    def test_invalid_bool_type(self):
-        # "abc" cannot be coerced to bool
-        data = {"methods": {"get_enabled": "abc"}}
-        with pytest.raises(ConfigValidationError) as exc_info:
-            validate_config_dict(data, Path("config.toml"))
-        error_msg = str(exc_info.value)
-        assert "methods.get_enabled" in error_msg
-        assert "bool" in error_msg
 
     def test_coercible_bool_type(self):
         # "true" can be coerced to True

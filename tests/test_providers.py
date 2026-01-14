@@ -1,73 +1,54 @@
-"""Tests for provider base class."""
+"""Tests for provider base class and concrete providers."""
 
 from __future__ import annotations
 
-from ddns_gateway.models import WarningModel
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderResult
+import pytest
+
+from ddns_gateway.providers.aliyun import AliyunProvider
+from ddns_gateway.providers.base import BaseDNSProvider, ProviderError
+from ddns_gateway.providers.cloudflare import CloudFlareProvider
+from ddns_gateway.providers.tencent import TencentProvider
+
+# =============================================================================
+# ProviderError Tests
+# =============================================================================
 
 
-class TestProviderResult:
-    """Tests for ProviderResult class."""
+class TestProviderError:
+    """Tests for ProviderError exception."""
 
-    def test_success_result(self):
-        result = ProviderResult(
-            success=True,
-            message="Record updated",
-            action="updated",
-            record_id="abc123",
-            request_id="req-xyz",
-            previous_value="1.1.1.1",
-        )
-        assert result.success is True
-        assert result.message == "Record updated"
-        assert result.action == "updated"
-        assert result.record_id == "abc123"
-        assert result.previous_value == "1.1.1.1"
+    def test_basic_error(self):
+        """Test creating a basic ProviderError."""
+        error = ProviderError("Zone not found")
+        assert str(error) == "Zone not found"
+        assert error.message == "Zone not found"
+        assert error.code is None
 
-    def test_error_result(self):
-        result = ProviderResult(
-            success=False,
-            message="Zone not found",
-        )
-        assert result.success is False
-        assert result.message == "Zone not found"
-        assert result.action is None
+    def test_error_with_code(self):
+        """Test creating a ProviderError with error code."""
+        error = ProviderError("API rate limited", code="RATE_LIMITED")
+        assert str(error) == "API rate limited"
+        assert error.message == "API rate limited"
+        assert error.code == "RATE_LIMITED"
 
-    def test_result_with_warnings(self):
-        warning = WarningModel(
-            code="comment_partial",
-            message="Failed to update remark",
-        )
-        result = ProviderResult(
-            success=True,
-            message="Updated",
-            action="updated",
-            warnings=[warning],
-        )
-        assert len(result.warnings) == 1
-        assert result.warnings[0].code == "comment_partial"
+    def test_error_is_exception(self):
+        """Test that ProviderError is a proper exception."""
+        with pytest.raises(ProviderError) as exc_info:
+            raise ProviderError("Test error")  # noqa: TRY003, EM101
+        assert str(exc_info.value) == "Test error"
 
-    def test_to_metadata(self):
-        result = ProviderResult(
-            success=True,
-            message="OK",
-            record_id="rec-1",
-            request_id="req-1",
-            zone_id="zone-1",
-            extra={"cf_ray": "ray-id"},
-        )
-        metadata = result.to_metadata()
-        assert metadata.record_id == "rec-1"
-        assert metadata.request_id == "req-1"
-        assert metadata.zone_id == "zone-1"
-        assert metadata.extra == {"cf_ray": "ray-id"}
+
+# =============================================================================
+# BaseDNSProvider Tests
+# =============================================================================
 
 
 class TestBaseDNSProvider:
     """Tests for BaseDNSProvider class."""
 
-    def test_build_fqdn_with_subdomain(self):
-        # Create a concrete implementation for testing
+    def _create_test_provider(self) -> BaseDNSProvider:
+        """Create a concrete implementation for testing."""
+
         class TestProvider(BaseDNSProvider):
             @property
             def name(self):
@@ -79,40 +60,87 @@ class TestBaseDNSProvider:
             async def create_record(self, *args, **kwargs):
                 pass
 
-            async def update_record_v2(self, *args, **kwargs):
+            async def update_record(self, *args, **kwargs):
                 pass
 
             async def delete_record(self, *args, **kwargs):
                 pass
 
-            async def update_record(self, *args, **kwargs):
-                pass
+        return TestProvider()
 
-        provider = TestProvider()
+    def test_build_fqdn_with_subdomain(self):
+        """Test build_fqdn with subdomain records."""
+        provider = self._create_test_provider()
         assert provider.build_fqdn("example.com", "home") == "home.example.com"
         assert provider.build_fqdn("example.com", "www") == "www.example.com"
 
     def test_build_fqdn_with_root(self):
-        class TestProvider(BaseDNSProvider):
-            @property
-            def name(self):
-                return "test"
-
-            async def find_record(self, *args, **kwargs):
-                pass
-
-            async def create_record(self, *args, **kwargs):
-                pass
-
-            async def update_record_v2(self, *args, **kwargs):
-                pass
-
-            async def delete_record(self, *args, **kwargs):
-                pass
-
-            async def update_record(self, *args, **kwargs):
-                pass
-
-        provider = TestProvider()
+        """Test build_fqdn with root record (@)."""
+        provider = self._create_test_provider()
         assert provider.build_fqdn("example.com", "@") == "example.com"
         assert provider.build_fqdn("example.com", "") == "example.com"
+
+    def test_build_fqdn_with_nested_subdomain(self):
+        """Test build_fqdn with nested subdomain."""
+        provider = self._create_test_provider()
+        assert provider.build_fqdn("example.com", "deep.sub") == "deep.sub.example.com"
+
+
+# =============================================================================
+# CloudFlareProvider Tests
+# =============================================================================
+
+
+class TestCloudFlareProvider:
+    """Tests for CloudFlareProvider class."""
+
+    def test_provider_name(self):
+        """Test that provider name is correct."""
+        provider = CloudFlareProvider()
+        assert provider.name == "cloudflare"
+
+    def test_build_fqdn(self):
+        """Test build_fqdn for CloudFlare provider."""
+        provider = CloudFlareProvider()
+        assert provider.build_fqdn("example.com", "www") == "www.example.com"
+        assert provider.build_fqdn("example.com", "@") == "example.com"
+
+
+# =============================================================================
+# AliyunProvider Tests
+# =============================================================================
+
+
+class TestAliyunProvider:
+    """Tests for AliyunProvider class."""
+
+    def test_provider_name(self):
+        """Test that provider name is correct."""
+        provider = AliyunProvider()
+        assert provider.name == "aliyun"
+
+    def test_build_fqdn(self):
+        """Test build_fqdn for Aliyun provider."""
+        provider = AliyunProvider()
+        assert provider.build_fqdn("example.com", "home") == "home.example.com"
+        assert provider.build_fqdn("example.com", "@") == "example.com"
+
+
+# =============================================================================
+# TencentProvider Tests
+# =============================================================================
+
+
+class TestTencentProvider:
+    """Tests for TencentProvider class."""
+
+    def test_provider_name(self):
+        """Test that provider name is correct."""
+        provider = TencentProvider()
+        assert provider.name == "tencent"
+
+    def test_build_fqdn(self):
+        """Test build_fqdn for Tencent provider."""
+        provider = TencentProvider()
+        assert provider.build_fqdn("example.com", "api") == "api.example.com"
+        assert provider.build_fqdn("example.com", "@") == "example.com"

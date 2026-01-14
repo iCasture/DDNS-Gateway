@@ -11,7 +11,6 @@ from ddns_gateway.config import (
     AuthConfig,
     Config,
     HealthConfig,
-    MethodsConfig,
     ServerConfig,
 )
 from ddns_gateway.server import app, lifespan, parse_upstream_auth
@@ -29,7 +28,6 @@ def mock_config_auth_enabled(monkeypatch):
     """Mock config with auth enabled and a valid token."""
     config = Config()
     config.auth = AuthConfig(enabled=True, tokens=["valid-token"])
-    config.methods = MethodsConfig(get_enabled=True, post_enabled=True)
     config.health = HealthConfig(enabled=True)
 
     def mock_get_config():
@@ -45,38 +43,7 @@ def mock_config_auth_disabled(monkeypatch):
     """Mock config with auth disabled."""
     config = Config()
     config.auth = AuthConfig(enabled=False, tokens=[])
-    config.methods = MethodsConfig(get_enabled=True, post_enabled=True)
     config.health = HealthConfig(enabled=True)
-
-    def mock_get_config():
-        return config
-
-    monkeypatch.setattr("ddns_gateway.server.get_config", mock_get_config)
-    monkeypatch.setattr("ddns_gateway.server._config", config)
-    return config
-
-
-@pytest.fixture
-def mock_config_get_disabled(monkeypatch):
-    """Mock config with GET method disabled."""
-    config = Config()
-    config.auth = AuthConfig(enabled=False, tokens=[])
-    config.methods = MethodsConfig(get_enabled=False, post_enabled=True)
-
-    def mock_get_config():
-        return config
-
-    monkeypatch.setattr("ddns_gateway.server.get_config", mock_get_config)
-    monkeypatch.setattr("ddns_gateway.server._config", config)
-    return config
-
-
-@pytest.fixture
-def mock_config_post_disabled(monkeypatch):
-    """Mock config with POST method disabled."""
-    config = Config()
-    config.auth = AuthConfig(enabled=False, tokens=[])
-    config.methods = MethodsConfig(get_enabled=True, post_enabled=False)
 
     def mock_get_config():
         return config
@@ -91,54 +58,34 @@ class TestAuthMiddleware:
 
     def test_missing_token_returns_401(self, client, mock_config_auth_enabled):
         """Test that missing Authorization header returns 401."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
         )
 
         assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
         data = response.json()
         assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_401_UNAUTHORIZED
-        assert data["message"] == "Missing authentication token"
+        assert any(e["code"] == "MISSING_AUTH_TOKEN" for e in data["errors"])
 
     def test_invalid_token_returns_403(self, client, mock_config_auth_enabled):
         """Test that invalid Bearer token returns 403."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
             headers={"Authorization": "Bearer invalid-token"},
         )
 
         assert response.status_code == st_status.HTTP_403_FORBIDDEN
         data = response.json()
         assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_403_FORBIDDEN
-        assert data["message"] == "Invalid authentication token"
+        assert any(e["code"] == "INVALID_AUTH_TOKEN" for e in data["errors"])
 
     def test_valid_token_passes_auth(self, client, mock_config_auth_enabled):
         """Test that valid Bearer token passes authentication (may fail at provider)."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
             headers={"Authorization": "Bearer valid-token"},
         )
 
@@ -150,15 +97,9 @@ class TestAuthMiddleware:
 
     def test_auth_disabled_allows_request(self, client, mock_config_auth_disabled):
         """Test that auth disabled allows request without Authorization header."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
         )
 
         # Should not be 401/403
@@ -169,15 +110,9 @@ class TestAuthMiddleware:
 
     def test_bearer_token_case_insensitive(self, client, mock_config_auth_enabled):
         """Test that 'bearer' prefix is case-insensitive."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
             headers={"Authorization": "BEARER valid-token"},
         )
 
@@ -188,82 +123,99 @@ class TestAuthMiddleware:
         ]
 
 
-class TestMethodMiddleware:
-    """Tests for HTTP method validation middleware."""
-
-    def test_get_disabled_returns_405(self, client, mock_config_get_disabled):
-        """Test that disabled GET method returns 405."""
-        response = client.get("/update")
-
-        assert response.status_code == st_status.HTTP_405_METHOD_NOT_ALLOWED
-        data = response.json()
-        assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_405_METHOD_NOT_ALLOWED
-        assert data["message"] == "GET method is disabled"
-
-    def test_post_disabled_returns_405(self, client, mock_config_post_disabled):
-        """Test that disabled POST method returns 405."""
-        response = client.post(
-            "/update",
-            json={
-                "provider": "cloudflare",
-                "zone": "example.com",
-                "record": "home",
-                "type": "A",
-                "value": "1.2.3.4",
-            },
-        )
-
-        assert response.status_code == st_status.HTTP_405_METHOD_NOT_ALLOWED
-        data = response.json()
-        assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_405_METHOD_NOT_ALLOWED
-        assert data["message"] == "POST method is disabled"
-
-
+@pytest.mark.usefixtures("mock_config_auth_disabled")
 class TestValidationErrorHandler:
     """Tests for validation error handling."""
 
-    def test_missing_params_returns_422(self, client, mock_config_auth_disabled):
+    def test_missing_value_returns_400(self, client):
+        """Test that missing value parameter returns 400."""
+        # PUT without value in body or query
+        response = client.put("/v1/ddns/cloudflare/example.com/A/home")
+
+        assert response.status_code == st_status.HTTP_400_BAD_REQUEST
+        data = response.json()
+        assert data["status"] == "error"
+        assert any("value" in e.get("field", "") for e in data["errors"])
+
+    def test_invalid_provider_returns_400(self, client):
+        """Test that invalid provider returns 400."""
+        response = client.put(
+            "/v1/ddns/invalid_provider/example.com/A/home",
+            json={"value": "1.2.3.4"},
+        )
+
+        assert response.status_code == st_status.HTTP_400_BAD_REQUEST
+        data = response.json()
+        assert data["status"] == "error"
+        assert any(e["code"] == "INVALID_PROVIDER" for e in data["errors"])
+
+    def test_missing_body_params_returns_422(self, client):
         """Test that missing parameters returns 422 with clear message."""
-        response = client.get("/update")
+        # Send empty body - but body is optional, so it falls back to query.
+        # To trigger 422, we need to send a body that is invalid (e.g. strict type check)
+        # OR force body parsing.
+        # But UpsertRequest fields are defaults or None... wait.
+        # UpsertRequest: value is required.
+        # If we send json={}, value is missing.
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={},  # Empty body, should fail Pydantic validation for 'value'
+        )
 
         assert response.status_code == st_status.HTTP_422_UNPROCESSABLE_CONTENT
         data = response.json()
         assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_422_UNPROCESSABLE_CONTENT
-        assert "Missing required fields" in data["message"]
-        # Check that missing fields are listed
-        assert "provider" in data["message"]
-        assert "zone" in data["message"]
-        assert "record" in data["message"]
-        assert "type" in data["message"]
-        assert "value" in data["message"]
+        assert len(data["errors"]) == 1
+        assert data["errors"][0]["code"] == "VALIDATION_ERROR"
+        assert "Missing required fields: value" in data["errors"][0]["message"]
 
-    def test_partial_params_lists_missing(self, client, mock_config_auth_disabled):
+    def test_partial_body_params_correctly_lists_missing(self, client):
         """Test that partial parameters correctly lists only missing ones."""
-        response = client.get(
-            "/update",
-            params={
-                "provider": "cloudflare",
-                "zone": "example.com",
-            },
+        # 'value' is the only required field in UpsertRequest.
+        # So missing it is the main case.
+        # Let's try to trigger multiple missing fields if possible.
+        # But only 'value' is required in UpsertRequest definition above.
+        # Let's check UpsertRequest definition in models.py.
+        # It has value: str = Field(..., min_length=1)
+        # All others are optional.
+        # So we can't easily trigger multiple missing fields with the current model.
+        # However, the user asked for "lists only missing ones".
+        # If I had more required fields, this would be relevant.
+        # I'll stick to testing the message format.
+        response = client.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={},
         )
-
         assert response.status_code == st_status.HTTP_422_UNPROCESSABLE_CONTENT
         data = response.json()
-        assert data["status"] == "error"
-        assert data["code"] == st_status.HTTP_422_UNPROCESSABLE_CONTENT
-        assert "Missing required fields" in data["message"]
-        # These should be listed as missing
-        assert "record" in data["message"]
-        assert "type" in data["message"]
-        assert "value" in data["message"]
-        # These should NOT be listed as missing (they were provided)
-        assert (
-            "provider" not in data["message"]
-            or "Missing required fields: " not in data["message"].split("provider")[0]
+        msg = data["errors"][0]["message"]
+        assert "Missing required fields: value" in msg
+        assert "ttl" not in msg  # Optional
+        assert "comment" not in msg  # Optional
+
+
+@pytest.mark.usefixtures("mock_config_auth_enabled")
+class TestDeleteEndpoint:
+    """Tests for DELETE /v1/ddns/{provider}/{zone}/{type}/{record} endpoint."""
+
+    def test_delete_with_auth(self, client):
+        """Test DELETE endpoint with valid auth."""
+        response = client.delete(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            headers={"Authorization": "Bearer valid-token"},
         )
+
+        # Should not be 401/403
+        assert response.status_code not in [
+            st_status.HTTP_401_UNAUTHORIZED,
+            st_status.HTTP_403_FORBIDDEN,
+        ]
+
+    def test_delete_without_auth_returns_401(self, client):
+        """Test DELETE endpoint without auth returns 401."""
+        response = client.delete("/v1/ddns/cloudflare/example.com/A/home")
+
+        assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
 
 
 class TestHealthEndpoint:
@@ -280,7 +232,6 @@ class TestHealthEndpoint:
         config = Config()
         config.server = ServerConfig()
         config.health = HealthConfig(enabled=True)
-        config.methods = MethodsConfig(get_enabled=True, post_enabled=True)
         config.auth = AuthConfig(enabled=True, tokens=["valid-token"])
 
         # Set the config before creating the app
@@ -303,7 +254,6 @@ class TestHealthEndpoint:
         config = Config()
         config.server = ServerConfig()
         config.health = HealthConfig(enabled=False)
-        config.methods = MethodsConfig(get_enabled=True, post_enabled=True)
         config.auth = AuthConfig(enabled=False, tokens=[])
 
         # Set the config before creating the app

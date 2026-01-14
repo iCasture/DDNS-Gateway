@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from starlette import status as st_status
 
 from ddns_gateway.models import (
     DDNSResponse,
@@ -15,11 +14,9 @@ from ddns_gateway.models import (
     ProviderMetadata,
     RecordInfo,
     RecordType,
-    ResponseData,
     ResponseMeta,
     ResultInfo,
     UpdateRequest,
-    UpdateResponse,
     UpsertRequest,
     WarningCode,
     WarningModel,
@@ -132,52 +129,6 @@ class TestUpdateRequest:
             value="v=DMARC1; p=none",
         )
         assert request.record_type == RecordType.TXT
-
-
-class TestUpdateResponse:
-    """Tests for UpdateResponse model."""
-
-    def test_success_response(self):
-        data = ResponseData(
-            provider="cloudflare",
-            zone="example.com",
-            record="home",
-            fqdn="home.example.com",
-            type="A",
-            value="1.2.3.4",
-            ttl=600,
-        )
-        response = UpdateResponse.success(
-            message="Record updated",
-            action="updated",
-            data=data,
-        )
-        assert response.status == "success"
-        assert response.code == st_status.HTTP_200_OK
-        assert response.action == "updated"
-        assert response.data is not None
-        assert response.data.fqdn == "home.example.com"
-
-    def test_error_response(self):
-        response = UpdateResponse.error(
-            code=st_status.HTTP_400_BAD_REQUEST,
-            message="Invalid provider",
-        )
-        assert response.status == "error"
-        assert response.code == st_status.HTTP_400_BAD_REQUEST
-        assert response.message == "Invalid provider"
-        assert response.action is None
-        assert response.data is None
-
-    def test_response_with_warnings(self):
-        warning = WarningModel(code="comment_ignored", message="Comment not supported")
-        response = UpdateResponse.error(
-            code=st_status.HTTP_400_BAD_REQUEST,
-            message="Error",
-            warnings=[warning],
-        )
-        assert len(response.warnings) == 1
-        assert response.warnings[0].code == "comment_ignored"
 
 
 class TestProviderMetadata:

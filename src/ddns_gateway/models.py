@@ -8,13 +8,12 @@ and configuration models.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from starlette import status as st_status
 
 # =============================================================================
 # Provider & Record Type Enums
@@ -161,8 +160,8 @@ class ErrorCode(StrEnum):
     TXT_VALUE_TOO_LONG = "TXT_VALUE_TOO_LONG"
 
     # Authentication errors
-    MISSING_AUTH_TOKEN = "MISSING_AUTH_TOKEN"
-    INVALID_AUTH_TOKEN = "INVALID_AUTH_TOKEN"
+    MISSING_AUTH_TOKEN = "MISSING_AUTH_TOKEN"  # noqa: S105
+    INVALID_AUTH_TOKEN = "INVALID_AUTH_TOKEN"  # noqa: S105
     MISSING_UPSTREAM_CREDENTIALS = "MISSING_UPSTREAM_CREDENTIALS"
     INVALID_UPSTREAM_CREDENTIALS = "INVALID_UPSTREAM_CREDENTIALS"
 
@@ -358,7 +357,7 @@ class ResponseMeta(BaseModel):
 
     request_id: str = Field(default_factory=lambda: str(uuid4()))
     timestamp: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat(),
     )
     dedupe: DedupeInfo | None = None
 
@@ -562,7 +561,7 @@ class DDNSResponse(BaseModel):
         provider: str,
         record: RecordInfo,
         result: ResultInfo | None = None,
-        upstream_called: bool = True,
+        upstream_called: bool = True,  # noqa: FBT001, FBT002
         warnings: list[WarningModel] | None = None,
         meta: ResponseMeta | None = None,
         debug: DebugInfo | None = None,
@@ -613,7 +612,7 @@ class DDNSResponse(BaseModel):
         errors: list[ErrorModel],
         provider: str,
         record: RecordInfo,
-        upstream_called: bool = False,
+        upstream_called: bool = False,  # noqa: FBT001, FBT002
         warnings: list[WarningModel] | None = None,
         meta: ResponseMeta | None = None,
         debug: DebugInfo | None = None,
@@ -671,109 +670,3 @@ class DDNSResponse(BaseModel):
             f"upstream_called={str(self.upstream_called).lower()}",
         ]
         return "\n".join(lines)
-
-
-class UpdateResponse(BaseModel):
-    """
-    DNS record update response model (legacy format).
-
-    This response format is designed to be compatible with RouterOS scripts,
-    which cannot parse JSON. ROS can check for success by looking for
-    the string '"status":"success"' in the response body.
-
-    Attributes
-    ----------
-    status : Literal["success", "error"]
-        The overall status of the operation.
-    code : int
-        HTTP-like status code.
-    message : str
-        Human-readable message describing the result.
-    action : Literal["created", "updated", "unchanged"] | None
-        The action taken (None for errors).
-    data : ResponseData | None
-        The response data payload (None for errors).
-    provider_metadata : ProviderMetadata | None
-        Provider-specific metadata.
-    warnings : list[Warning]
-        List of non-critical warnings.
-    """
-
-    status: Literal["success", "error"]
-    code: int
-    message: str
-    action: Literal["created", "updated", "unchanged"] | None = None
-    data: ResponseData | None = None
-    provider_metadata: ProviderMetadata | None = None
-    warnings: list[WarningModel] = Field(default_factory=list)
-
-    @classmethod
-    def success(
-        cls,
-        message: str,
-        action: Literal["created", "updated", "unchanged"],
-        data: ResponseData,
-        provider_metadata: ProviderMetadata | None = None,
-        warnings: list[WarningModel] | None = None,
-    ) -> UpdateResponse:
-        """
-        Create a successful response.
-
-        Parameters
-        ----------
-        message : str
-            Human-readable success message.
-        action : Literal["created", "updated", "unchanged"]
-            The action that was taken.
-        data : ResponseData
-            The response data payload.
-        provider_metadata : ProviderMetadata | None, optional
-            Provider-specific metadata.
-        warnings : list[WarningModel] | None, optional
-            List of warnings.
-
-        Returns
-        -------
-        UpdateResponse
-            A success response instance.
-        """
-        return cls(
-            status="success",
-            code=st_status.HTTP_200_OK,
-            message=message,
-            action=action,
-            data=data,
-            provider_metadata=provider_metadata,
-            warnings=warnings or [],
-        )
-
-    @classmethod
-    def error(
-        cls,
-        code: int,
-        message: str,
-        warnings: list[WarningModel] | None = None,
-    ) -> UpdateResponse:
-        """
-        Create an error response.
-
-        Parameters
-        ----------
-        code : int
-            HTTP-like error code.
-        message : str
-            Human-readable error message.
-        warnings : list[WarningModel] | None, optional
-            List of warnings.
-
-        Returns
-        -------
-        UpdateResponse
-            An error response instance.
-        """
-        return cls(
-            status="error",
-            code=code,
-            message=message,
-            warnings=warnings or [],
-        )

@@ -1,35 +1,39 @@
 """
 FastAPI server for DDNS Gateway.
 
-This module provides the main API server with endpoints for updating DNS records.
-Supports both GET and POST methods with optional authentication.
+This module provides the main API server with endpoints for DNS record operations.
+Supports PUT (upsert) and DELETE methods with authentication.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from starlette import status as st_status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from ddns_gateway.config import Config, load_config
 from ddns_gateway.models import (
+    DDNSResponse,
     DNSProvider,
-    RecordType,
-    ResponseData,
-    UpdateResponse,
+    ErrorCode,
+    ErrorModel,
+    RecordInfo,
+    ResponseMeta,
+    UpsertRequest,
+    WarningCode,
+    WarningModel,
 )
 from ddns_gateway.providers.aliyun import AliyunProvider
 from ddns_gateway.providers.cloudflare import CloudFlareProvider
 from ddns_gateway.providers.tencent import TencentProvider
+from ddns_gateway.service import delete_record_service, upsert_record_service
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -78,11 +82,10 @@ def set_preloaded_config(config: Config) -> None:
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """
-    Middleware for authentication and method validation.
+    Middleware for authentication.
 
-    Intercepts requests to /update before parameter validation to check:
-    1. HTTP method enablement (GET/POST) -> 405 if disabled
-    2. Authentication via Authorization header -> 401 if missing, 403 if invalid
+    Intercepts requests to /v1/ddns/ endpoints to check:
+    1. Authentication via Authorization header -> 401 if missing, 403 if invalid
     """
 
     async def dispatch(
@@ -90,9 +93,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: RequestResponseEndpoint,
     ) -> Response:
-        """Process the request through auth/method validation."""
-        # Only apply to /update path
-        if request.url.path != "/update":
+        """Process the request through authentication."""
+        # Only apply to /v1/ddns/ paths
+        if not request.url.path.startswith("/v1/ddns/"):
             return await call_next(request)
 
         # Config may not be loaded during startup
@@ -100,28 +103,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             config = get_config()
         except RuntimeError:
             return await call_next(request)
-
-        method = request.method
-
-        # Check method enablement
-        if method == "GET" and not config.methods.get_enabled:
-            return JSONResponse(
-                status_code=st_status.HTTP_405_METHOD_NOT_ALLOWED,
-                content={
-                    "status": "error",
-                    "code": st_status.HTTP_405_METHOD_NOT_ALLOWED,
-                    "message": "GET method is disabled",
-                },
-            )
-        if method == "POST" and not config.methods.post_enabled:
-            return JSONResponse(
-                status_code=st_status.HTTP_405_METHOD_NOT_ALLOWED,
-                content={
-                    "status": "error",
-                    "code": st_status.HTTP_405_METHOD_NOT_ALLOWED,
-                    "message": "POST method is disabled",
-                },
-            )
 
         # Skip auth check if disabled
         if not config.auth.enabled:
@@ -137,20 +118,44 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not server_token:
             return JSONResponse(
                 status_code=st_status.HTTP_401_UNAUTHORIZED,
-                content={
-                    "status": "error",
-                    "code": st_status.HTTP_401_UNAUTHORIZED,
-                    "message": "Missing authentication token",
-                },
+                content=DDNSResponse(
+                    status="error",
+                    action=None,
+                    upstream_called=False,
+                    provider="unknown",
+                    record=RecordInfo(zone="", type="", name=""),
+                    result=None,
+                    warnings=[],
+                    errors=[
+                        ErrorModel(
+                            code=ErrorCode.MISSING_AUTH_TOKEN,
+                            message="Missing authentication token",
+                        ),
+                    ],
+                    meta=ResponseMeta(),
+                    debug=None,
+                ).model_dump(exclude_none=True),
             )
         if server_token not in config.auth.tokens:
             return JSONResponse(
                 status_code=st_status.HTTP_403_FORBIDDEN,
-                content={
-                    "status": "error",
-                    "code": st_status.HTTP_403_FORBIDDEN,
-                    "message": "Invalid authentication token",
-                },
+                content=DDNSResponse(
+                    status="error",
+                    action=None,
+                    upstream_called=False,
+                    provider="unknown",
+                    record=RecordInfo(zone="", type="", name=""),
+                    result=None,
+                    warnings=[],
+                    errors=[
+                        ErrorModel(
+                            code=ErrorCode.INVALID_AUTH_TOKEN,
+                            message="Invalid authentication token",
+                        ),
+                    ],
+                    meta=ResponseMeta(),
+                    debug=None,
+                ).model_dump(exclude_none=True),
             )
 
         return await call_next(request)
@@ -166,23 +171,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     if _config is None:
         _config = load_config()
 
-    # Dynamically register "/health"  endpoint (GET method) if enabled
+    # Dynamically register "/health" endpoint (GET method) if enabled
     if _config.health.enabled:
         _app.add_api_route("/health", health, methods=["GET"])
 
-    methods = []
-    if _config.methods.get_enabled:
-        methods.append("GET")
-    if _config.methods.post_enabled:
-        methods.append("POST")
-    method_label = "Method" if len(methods) == 1 else "Methods"
-
     logger.info(
-        'DDNS Gateway starting on "%s:%d" (%s: "%s").',
+        'DDNS Gateway starting on "%s:%d".',
         _config.server.host,
         _config.server.port,
-        method_label,
-        ", ".join(methods),
     )
 
     yield
@@ -193,11 +189,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="DDNS Gateway",
     description="DDNS update service for RouterOS - bridges ROS scripts with DNS providers",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
-# Add middleware for auth and method validation
+# Add middleware for authentication
 app.add_middleware(AuthMiddleware)
 
 
@@ -207,15 +203,27 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> Respo
     Handle HTTP exceptions with consistent JSON responses.
 
     Convert FastAPI's default {"detail": "..."} format to the unified
-    API response format {"status": "error", "code": ..., "message": "..."}.
+    API response format.
     """
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "status": "error",
-            "code": exc.status_code,
-            "message": exc.detail,
-        },
+        content=DDNSResponse(
+            status="error",
+            action=None,
+            upstream_called=False,
+            provider="unknown",
+            record=RecordInfo(zone="", type="", name=""),
+            result=None,
+            warnings=[],
+            errors=[
+                ErrorModel(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=str(exc.detail),
+                ),
+            ],
+            meta=ResponseMeta(),
+            debug=None,
+        ).model_dump(exclude_none=True),
     )
 
 
@@ -235,7 +243,9 @@ async def validation_exception_handler(
     invalid_fields: list[str] = []
 
     for error in errors:
-        field_path = ".".join(str(loc) for loc in error["loc"] if loc != "query")
+        field_path = ".".join(
+            str(loc) for loc in error["loc"] if loc not in {"query", "body"}
+        )
         if error["type"] == "missing":
             missing_fields.append(field_path)
         else:
@@ -252,29 +262,29 @@ async def validation_exception_handler(
 
     return JSONResponse(
         status_code=st_status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content={
-            "status": "error",
-            "code": st_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "message": message,
-        },
+        content=DDNSResponse(
+            status="error",
+            action=None,
+            upstream_called=False,
+            provider="unknown",
+            record=RecordInfo(zone="", type="", name=""),
+            result=None,
+            warnings=[],
+            errors=[
+                ErrorModel(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=message,
+                ),
+            ],
+            meta=ResponseMeta(),
+            debug=None,
+        ).model_dump(exclude_none=True),
     )
 
 
-class UpdateParams(BaseModel):
-    """
-    Query/body parameters for the update endpoint.
-
-    For GET requests: These fields are parsed from query parameters.
-    For POST requests: These fields are parsed from the JSON body.
-    """
-
-    provider: DNSProvider
-    zone: str = Field(..., min_length=1)
-    record: str = Field(..., min_length=1)
-    type: RecordType
-    value: str = Field(..., min_length=1)
-    ttl: int | None = Field(default=None, ge=1, le=86400)
-    comment: str | None = Field(default=None, max_length=500)
+# =============================================================================
+# Credential Parsing
+# =============================================================================
 
 
 # Regex pattern to parse X-Upstream-Authorization header
@@ -297,14 +307,14 @@ _UPSTREAM_AUTH_PATTERN: Final[re.Pattern[str]] = re.compile(
             # Pattern 1: id first, then secret
             id\s*=\s*
             (?:
-                (?P<q1>["'])(?P<id1>(?:(?!(?P=q1)).)*)(?P=q1)   # quoted
+                (?P<q1>["'])(?P<id1>(?:(?!(?P=q1)).)*?)(?P=q1)   # quoted
                 |
                 (?P<id1_nq>[^,\s]+)                             # unquoted
             )
             \s*,\s*
             secret\s*=\s*
             (?:
-                (?P<q2>["'])(?P<secret1>(?:(?!(?P=q2)).)*)(?P=q2)  # quoted
+                (?P<q2>["'])(?P<secret1>(?:(?!(?P=q2)).)*?)(?P=q2)  # quoted
                 |
                 (?P<secret1_nq>[^,\s]+)                            # unquoted
             )
@@ -312,7 +322,7 @@ _UPSTREAM_AUTH_PATTERN: Final[re.Pattern[str]] = re.compile(
             # Pattern 2: secret first, id optional
             secret\s*=\s*
             (?:
-                (?P<q3>["'])(?P<secret2>(?:(?!(?P=q3)).)*)(?P=q3)  # quoted
+                (?P<q3>["'])(?P<secret2>(?:(?!(?P=q3)).)*?)(?P=q3)  # quoted
                 |
                 (?P<secret2_nq>[^,\s]+)                            # unquoted
             )
@@ -320,7 +330,7 @@ _UPSTREAM_AUTH_PATTERN: Final[re.Pattern[str]] = re.compile(
                 \s*,\s*
                 id\s*=\s*
                 (?:
-                    (?P<q4>["'])(?P<id2>(?:(?!(?P=q4)).)*)(?P=q4)  # quoted
+                    (?P<q4>["'])(?P<id2>(?:(?!(?P=q4)).)*?)(?P=q4)  # quoted
                     |
                     (?P<id2_nq>[^,\s]+)                            # unquoted
                 )
@@ -397,7 +407,7 @@ def extract_credentials_from_header(
     Parameters
     ----------
     provider : DNSProvider
-        The DNS provider type.
+        The DNS provider enum.
     request : Request
         The FastAPI request object.
 
@@ -417,166 +427,362 @@ def extract_credentials_from_header(
     if provider == DNSProvider.CLOUDFLARE:
         # Cloudflare only needs secret (token), id is ignored if provided
         if auth_secret:
-            creds["cf_token"] = auth_secret
-    elif provider == DNSProvider.ALIYUN:
+            creds["secret"] = auth_secret
+    elif provider in (DNSProvider.ALIYUN, DNSProvider.TENCENT):
+        # Aliyun and Tencent use both id and secret
         if auth_id:
-            creds["ali_access_key_id"] = auth_id
+            creds["id"] = auth_id
         if auth_secret:
-            creds["ali_access_key_secret"] = auth_secret
-    elif provider == DNSProvider.TENCENT:
-        if auth_id:
-            creds["tc_secret_id"] = auth_id
-        if auth_secret:
-            creds["tc_secret_key"] = auth_secret
+            creds["secret"] = auth_secret
 
     return creds
 
 
-async def process_update(params: UpdateParams, request: Request) -> UpdateResponse:
-    """
-    Process a DNS update request.
+# =============================================================================
+# API Endpoints
+# =============================================================================
 
-    Parameters
-    ----------
-    params : UpdateParams
-        Request parameters.
-    request : Request
-        The FastAPI request object (for reading headers).
+
+@app.put("/v1/ddns/{provider}/{zone}/{record_type}/{record}")
+async def upsert_ddns_record(
+    provider: str,
+    zone: str,
+    record_type: str,
+    record: str,
+    request: Request,
+    body: UpsertRequest | None = None,
+    value: Annotated[str | None, Query()] = None,
+    ttl: Annotated[int | None, Query(ge=1, le=86400)] = None,
+    comment: Annotated[str | None, Query(max_length=500)] = None,
+    proxied: Annotated[bool | None, Query()] = None,
+) -> Response:
+    """
+    Upsert (create or update) a DNS record.
+
+    Path Parameters
+    ---------------
+    provider : str
+        The DNS provider (e.g. 'cloudflare', 'aliyun', 'tencent').
+        Must be a valid value from the `DNSProvider` enum.
+    zone : str
+        The DNS zone (root domain, e.g., "example.com").
+    record_type : str
+        The record type: A, AAAA, CNAME, TXT (case-insensitive).
+    record : str
+        The host record name (e.g., "home", "@", "*").
+
+    Body Parameters (JSON, preferred)
+    ----------------------------------
+    value : str
+        The desired record value (required).
+    ttl : int | None
+        The desired TTL in seconds (optional).
+    comment : str | None
+        The desired comment (optional).
+    proxied : bool | None
+        The Cloudflare proxy status (CF only, A/AAAA/CNAME).
+
+    Query Parameters (fallback if no body)
+    --------------------------------------
+    Same as body parameters.
 
     Returns
     -------
-    UpdateResponse
-        The response to send to the client.
+    DDNSResponse
+        The operation result.
     """
-    start_time = time.monotonic()
+    provider_lower = provider.lower()
 
-    # Log request (credentials masked by logging filter)
+    # Validate provider
+    try:
+        provider_enum = DNSProvider(provider_lower)
+    except ValueError:
+        return JSONResponse(
+            status_code=st_status.HTTP_400_BAD_REQUEST,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider=provider_lower,
+                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
+                result=None,
+                warnings=[],
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.INVALID_PROVIDER,
+                        message=(
+                            f"Invalid provider: {provider}. "
+                            f"Must be one of: {', '.join([p.value for p in DNSProvider])}."
+                        ),
+                        field="provider",
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    # Get provider instance
+    provider_instance = _providers.get(provider_enum)
+    if provider_instance is None:
+        return JSONResponse(
+            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider=provider_lower,
+                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
+                result=None,
+                warnings=[],
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.INTERNAL_ERROR,
+                        message=f"Provider {provider} not initialized",
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    # Determine value source (body preferred over query)
+    # If both body and query have values, log a debug warning and ignore query
+    api_warnings: list[WarningModel] = []
+    final_value: str | None = None
+    final_ttl: int | None = None
+    final_comment: str | None = None
+    final_proxied: bool | None = None
+
+    if body is not None:
+        # Check for ignored query parameters
+        ignored_params: list[str] = []
+        if value is not None:
+            ignored_params.append("value")
+        if ttl is not None:
+            ignored_params.append("ttl")
+        if comment is not None:
+            ignored_params.append("comment")
+        if proxied is not None:
+            ignored_params.append("proxied")
+
+        if ignored_params:
+            logger.debug(
+                "Query parameters ignored due to body: %s",
+                ", ".join(ignored_params),
+            )
+            api_warnings.append(
+                WarningModel(
+                    code=WarningCode.QUERY_IGNORED_DUE_TO_BODY,
+                    message=f"Query parameters ignored: {', '.join(ignored_params)}",
+                    details={"ignored_params": ignored_params},
+                ),
+            )
+
+        final_value = body.value
+        final_ttl = body.ttl
+        final_comment = body.comment
+        final_proxied = body.proxied
+    else:
+        final_value = value
+        final_ttl = ttl
+        final_comment = comment
+        final_proxied = proxied
+
+    # Validate value
+    if not final_value:
+        return JSONResponse(
+            status_code=st_status.HTTP_400_BAD_REQUEST,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider=provider_lower,
+                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
+                result=None,
+                warnings=api_warnings,
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.VALIDATION_ERROR,
+                        message="Missing required field: value",
+                        field="value",
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    # Extract credentials
+    credentials = extract_credentials_from_header(provider_enum, request)
+
+    # Log request
     logger.info(
-        "[request] provider=%s zone=%s record=%s type=%s value=%s",
-        params.provider,
-        params.zone,
-        params.record,
-        params.type,
-        params.value,
+        "[request] PUT /v1/ddns/%s/%s/%s/%s value=%s",
+        provider_lower,
+        zone,
+        record_type,
+        record,
+        final_value,
     )
 
-    # Get provider
-    provider = _providers.get(params.provider)
-    if provider is None:
-        return UpdateResponse.error(
-            st_status.HTTP_400_BAD_REQUEST,
-            f"Unknown provider: {params.provider}",
-        )
-
-    # Extract credentials from header
-    credentials = extract_credentials_from_header(params.provider, request)
-
-    # Call provider
-    result = await provider.update_record(
-        zone=params.zone,
-        record=params.record,
-        record_type=params.type,
-        value=params.value,
-        ttl=params.ttl,
-        credentials=credentials,
-        comment=params.comment,
-    )
-
-    duration = time.monotonic() - start_time
-
-    if result.success:
-        # Build FQDN
-        fqdn = provider.build_fqdn(params.zone, params.record)
-
-        # Build response data
-        data = ResponseData(
-            provider=params.provider.value,
-            zone=params.zone,
-            record=params.record,
-            fqdn=fqdn,
-            type=params.type.value,
-            value=params.value,
-            ttl=params.ttl,
-            previous_value=result.previous_value,
-        )
-
-        logger.info(
-            "[response] status=success action=%s duration=%.2fs",
-            result.action,
-            duration,
-        )
-
-        return UpdateResponse.success(
-            message=result.message,
-            action=result.action,  # type: ignore[arg-type]
-            data=data,
-            provider_metadata=result.to_metadata(),
-            warnings=result.warnings,
-        )
-    logger.warning(
-        "[response] status=error message=%s duration=%.2fs",
-        result.message,
-        duration,
-    )
-
-    return UpdateResponse.error(
-        code=st_status.HTTP_400_BAD_REQUEST,
-        message=result.message,
-        warnings=result.warnings,
-    )
-
-
-@app.get("/update")
-async def update_get(
-    request: Request,
-    provider: Annotated[DNSProvider, Query()],
-    zone: Annotated[str, Query(min_length=1)],
-    record: Annotated[str, Query(min_length=1)],
-    record_type: Annotated[RecordType, Query(alias="type")],
-    value: Annotated[str, Query(min_length=1)],
-    ttl: Annotated[int | None, Query(ge=1, le=86400)] = None,
-    comment: Annotated[str | None, Query(max_length=500)] = None,
-) -> Response:
-    """
-    Update a DNS record (GET method).
-
-    This endpoint is designed for easy use with RouterOS /tool fetch.
-    Record details must be provided as query parameters.
-    Credentials (server token & provider keys) are passed via HTTP headers.
-    """
-    # Method enablement and auth are checked by AuthMiddleware
-    params = UpdateParams(
-        provider=provider,
+    # Call service layer
+    response = await upsert_record_service(
+        provider_instance=provider_instance,
+        provider=provider_lower,
         zone=zone,
+        record_type=record_type,
         record=record,
-        type=record_type,
-        value=value,
-        ttl=ttl,
-        comment=comment,
+        value=final_value,
+        ttl=final_ttl,
+        comment=final_comment,
+        proxied=final_proxied,
+        credentials=credentials,
     )
 
-    response = await process_update(params, request)
+    # Merge API-layer warnings into response
+    if api_warnings:
+        response.warnings = api_warnings + response.warnings
 
-    status_code = response.code if response.status == "error" else st_status.HTTP_200_OK
+    # Determine HTTP status code
+    status_code = (
+        st_status.HTTP_200_OK
+        if response.status == "success"
+        else st_status.HTTP_400_BAD_REQUEST
+    )
+
+    logger.info(
+        "[response] status=%s action=%s upstream_called=%s",
+        response.status,
+        response.action,
+        response.upstream_called,
+    )
+
     return JSONResponse(
         content=response.model_dump(exclude_none=True),
         status_code=status_code,
     )
 
 
-@app.post("/update")
-async def update_post(request: Request, params: UpdateParams) -> Response:
+@app.delete("/v1/ddns/{provider}/{zone}/{record_type}/{record}")
+async def delete_ddns_record(
+    provider: str,
+    zone: str,
+    record_type: str,
+    record: str,
+    request: Request,
+) -> Response:
     """
-    Update a DNS record (POST method).
+    Delete a DNS record.
 
-    Record details must be provided in the JSON body.
-    Content-Type header must be set to "application/json".
-    Credentials (server token & provider keys) are passed via HTTP headers.
+    Path Parameters
+    ---------------
+    provider : str
+        The DNS provider (e.g. 'cloudflare', 'aliyun', 'tencent').
+        Must be a valid value from the `DNSProvider` enum.
+    zone : str
+        The DNS zone (root domain, e.g., "example.com").
+    record_type : str
+        The record type: A, AAAA, CNAME, TXT (case-insensitive).
+    record : str
+        The host record name (e.g., "home", "@", "*").
+
+    Returns
+    -------
+    DDNSResponse
+        The operation result.
     """
-    # Method enablement and auth are checked by AuthMiddleware
-    response = await process_update(params, request)
+    provider_lower = provider.lower()
 
-    status_code = response.code if response.status == "error" else st_status.HTTP_200_OK
+    # Validate provider
+    try:
+        provider_enum = DNSProvider(provider_lower)
+    except ValueError:
+        return JSONResponse(
+            status_code=st_status.HTTP_400_BAD_REQUEST,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider=provider_lower,
+                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
+                result=None,
+                warnings=[],
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.INVALID_PROVIDER,
+                        message=(
+                            f"Invalid provider: {provider}. "
+                            f"Must be one of: {', '.join([p.value for p in DNSProvider])}"
+                        ),
+                        field="provider",
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    # Get provider instance
+    provider_instance = _providers.get(provider_enum)
+    if provider_instance is None:
+        return JSONResponse(
+            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider=provider_lower,
+                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
+                result=None,
+                warnings=[],
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.INTERNAL_ERROR,
+                        message=f"Provider {provider} not initialized",
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    # Extract credentials
+    credentials = extract_credentials_from_header(provider_enum, request)
+
+    # Log request
+    logger.info(
+        "[request] DELETE /v1/ddns/%s/%s/%s/%s",
+        provider_lower,
+        zone,
+        record_type,
+        record,
+    )
+
+    # Call service layer
+    response = await delete_record_service(
+        provider_instance=provider_instance,
+        provider=provider_lower,
+        zone=zone,
+        record_type=record_type,
+        record=record,
+        credentials=credentials,
+    )
+
+    # Determine HTTP status code
+    status_code = (
+        st_status.HTTP_200_OK
+        if response.status == "success"
+        else st_status.HTTP_400_BAD_REQUEST
+    )
+
+    logger.info(
+        "[response] status=%s action=%s upstream_called=%s",
+        response.status,
+        response.action,
+        response.upstream_called,
+    )
+
     return JSONResponse(
         content=response.model_dump(exclude_none=True),
         status_code=status_code,

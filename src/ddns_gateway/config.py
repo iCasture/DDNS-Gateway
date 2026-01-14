@@ -18,13 +18,12 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ValidationError, model_validator
-from pydantic_core import PydanticCustomError
+from pydantic import BaseModel, ValidationError
 
 from ddns_gateway.logging_config import DATE_FORMAT, LOG_FORMAT
 
 if TYPE_CHECKING:
-    from typing import Any, Self
+    from typing import Any
 
 # Configure basic logging for early startup messages.
 # This ensures log messages during config loading (before "setup_logging()" is called)
@@ -106,45 +105,6 @@ class AuthConfig(BaseModel):
 
     enabled: bool = False
     tokens: list[str] = []
-
-
-class MethodsConfig(BaseModel):
-    """
-    HTTP methods configuration.
-
-    Attributes
-    ----------
-    get_enabled : bool
-        Whether GET method is enabled.
-    post_enabled : bool
-        Whether POST method is enabled.
-    """
-
-    get_enabled: bool = True
-    post_enabled: bool = True
-
-    @model_validator(mode="after")
-    def check_at_least_one_method_enabled(self) -> Self:
-        """
-        Validate that at least one method is enabled.
-
-        Returns
-        -------
-        Self
-            The validated model.
-
-        Raises
-        ------
-        PydanticCustomError
-            If both GET and POST methods are disabled.
-        """
-        if not self.get_enabled and not self.post_enabled:
-            err_type = "methods_config_error"
-            raise PydanticCustomError(
-                err_type,
-                "At least one HTTP method must be enabled (GET or POST)",
-            )
-        return self
 
 
 class LoggingConfig(BaseModel):
@@ -286,8 +246,6 @@ class Config(BaseModel):
         Server configuration.
     auth : AuthConfig
         Authentication configuration.
-    methods : MethodsConfig
-        HTTP methods configuration (deprecated, will be removed).
     logging : LoggingConfig
         Logging configuration.
     health : HealthConfig
@@ -302,7 +260,6 @@ class Config(BaseModel):
 
     server: ServerConfig = ServerConfig()
     auth: AuthConfig = AuthConfig()
-    methods: MethodsConfig = MethodsConfig()
     logging: LoggingConfig = LoggingConfig()
     health: HealthConfig = HealthConfig()
     dedupe: DedupeConfig = DedupeConfig()
@@ -350,17 +307,11 @@ def _format_validation_errors(
             f'"{error_input}"' if isinstance(error_input, str) else repr(error_input)
         )
 
-        if error_type == "methods_config_error":
-            # lines.append(f"  [{field_path}]: {err['msg']} ({value_repr}).")
-            lines.append(
-                f"  [{field_path}]: {err['msg']}: {', '.join(f'"{k}": {v}' for k, v in error_input.items())}.",  # pyright: ignore[reportAttributeAccessIssue]
-            )
-        else:
-            # Determine expected type from error type
-            expected_type = _get_expected_type(error_type)
-            lines.append(
-                f"  [{field_path}]: Expected {expected_type}, got {input_type} (value: {value_repr}). {err['msg']}.",
-            )
+        # Determine expected type from error type
+        expected_type = _get_expected_type(error_type)
+        lines.append(
+            f"  [{field_path}]: Expected {expected_type}, got {input_type} (value: {value_repr}). {err['msg']}.",
+        )
 
     return "\n".join(lines)
 
