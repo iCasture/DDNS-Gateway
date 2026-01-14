@@ -305,6 +305,146 @@ class TestDedupeCache:
 
 
 # =============================================================================
+# Singleflight Tests
+# =============================================================================
+
+
+class TestSingleflight:
+    """Tests for Singleflight mechanism."""
+
+    @pytest.fixture
+    def sample_base(self) -> CachedResponseBase:
+        """Create a sample CachedResponseBase for testing."""
+        return CachedResponseBase(
+            status="success",
+            original_action="created",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            record_id="rec123",
+            zone_id="zone456",
+            value="1.2.3.4",
+            ttl=300,
+            comment="test",
+            proxied=False,
+            previous_value=None,
+            warnings=(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_mark_in_flight_first_request(self):
+        """Test first request successfully marks as leader."""
+        cache = DedupeCache()
+        result = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_mark_in_flight_second_request_returns_false(self):
+        """Test second request returns False (already in-flight)."""
+        cache = DedupeCache()
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+        result = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_clear_in_flight(self):
+        """Test clearing in-flight flag."""
+        cache = DedupeCache()
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+
+        # Should clear in-flight
+        await cache.clear_in_flight("key1")
+
+        # Now we can mark again
+        result = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_set_clears_in_flight(self, sample_base: CachedResponseBase):
+        """Test that set() clears in-flight and notifies waiters."""
+        cache = DedupeCache()
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+
+        # Set should replace in-flight with ready entry
+        await cache.set("key1", sample_base)
+
+        # Entry should be ready (not in-flight)
+        entry = await cache.get("key1")
+        assert entry is not None
+        assert entry.in_flight is False
+        assert entry.base == sample_base
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_immediate(self, sample_base: CachedResponseBase):
+        """Test wait returns immediately if result already exists."""
+        cache = DedupeCache()
+        await cache.set("key1", sample_base)
+
+        # Wait should return immediately
+        result = await cache.wait_for_result("key1", wait_timeout_sec=0.1)
+        assert result is not None
+        assert result.base == sample_base
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_timeout(self):
+        """Test wait returns None on timeout."""
+        cache = DedupeCache()
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+
+        # Wait should timeout
+        result = await cache.wait_for_result("key1", wait_timeout_sec=0.1)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_success(self, sample_base: CachedResponseBase):
+        """Test wait returns result when set is called."""
+        cache = DedupeCache()
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+
+        async def set_after_delay():
+            await asyncio.sleep(0.1)
+            await cache.set("key1", sample_base)
+
+        async def wait_for_it():
+            return await cache.wait_for_result("key1", wait_timeout_sec=1.0)
+
+        # Run both concurrently
+        results = await asyncio.gather(set_after_delay(), wait_for_it())
+        wait_result = results[1]
+
+        assert wait_result is not None
+        assert wait_result.base == sample_base
+
+    @pytest.mark.asyncio
+    async def test_lease_expiration_allows_takeover(self):
+        """Test that expired lease allows takeover."""
+        cache = DedupeCache()
+
+        # Mark with very short lease
+        await cache.mark_in_flight("key1", lease_sec=0.1)
+
+        # Wait for lease to expire
+        await asyncio.sleep(0.2)
+
+        # Should be able to takeover
+        result = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_valid_cache_prevents_mark(self, sample_base: CachedResponseBase):
+        """Test that valid cache entry prevents marking in-flight."""
+        cache = DedupeCache()
+
+        # Set valid entry
+        await cache.set("key1", sample_base)
+
+        # Should not be able to mark (cache hit)
+        result = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert result is False
+
+
+# =============================================================================
 # compute_dedupe_key Tests (additional tests in dedupe module)
 # =============================================================================
 

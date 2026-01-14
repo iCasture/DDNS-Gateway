@@ -185,6 +185,13 @@ class DedupeConfig(BaseModel):
         Time window in seconds for deduplication.
     max_entries : int
         Maximum number of cache entries.
+    singleflight_wait_timeout_sec : float
+        Maximum time (seconds) for waiters to wait for leader's result.
+        If exceeded, waiter returns error (does not start new request).
+        Should be >= (request_timeout * max_attempts) + backoff_total + margin.
+    singleflight_lease_sec : float
+        In-flight lease duration (seconds). If leader doesn't complete within
+        this time, waiters may "takeover" as new leader. Should be >= 2x wait_timeout.
     persist : DedupePersistConfig
         Persistence configuration.
     """
@@ -192,6 +199,8 @@ class DedupeConfig(BaseModel):
     enabled: bool = True
     window_seconds: int = 300
     max_entries: int = 1000
+    singleflight_wait_timeout_sec: float = 30.0
+    singleflight_lease_sec: float = 60.0
     persist: DedupePersistConfig = DedupePersistConfig()
 
 
@@ -205,6 +214,8 @@ class RetryConfig(BaseModel):
         Whether automatic retry is enabled.
     max_attempts : int
         Maximum number of attempts (including first).
+    request_timeout_sec : float
+        Per-request timeout in seconds.
     base_delay_ms : int
         Base delay in milliseconds.
     max_delay_ms : int
@@ -217,8 +228,9 @@ class RetryConfig(BaseModel):
 
     enabled: bool = True
     max_attempts: int = 3
-    base_delay_ms: int = 200
-    max_delay_ms: int = 2000
+    request_timeout_sec: float = 7.0
+    base_delay_ms: int = 1000
+    max_delay_ms: int = 10000
     jitter: bool = True
     on_http_status: list[int] = [429, 500, 502, 503, 504]
 

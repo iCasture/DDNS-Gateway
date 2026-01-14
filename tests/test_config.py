@@ -97,11 +97,34 @@ class TestRetryConfig:
         config = RetryConfig()
         assert config.enabled is True
         assert config.max_attempts == 3
-        assert config.base_delay_ms == 200
-        assert config.max_delay_ms == 2000
+        assert config.request_timeout_sec == 7.0
+        assert config.base_delay_ms == 1000
+        assert config.max_delay_ms == 10000
         assert config.jitter is True
         assert 429 in config.on_http_status
         assert 500 in config.on_http_status
+
+    def test_custom_request_timeout(self):
+        """Test that custom request_timeout_sec is correctly applied."""
+        config = RetryConfig(request_timeout_sec=15.0)
+        assert config.request_timeout_sec == 15.0
+
+    def test_from_toml_loads_custom_timeout(self):
+        """Test that request_timeout_sec loads correctly from TOML."""
+        toml_content = """
+[retry]
+request_timeout_sec = 12.5
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write(toml_content)
+            f.flush()
+            config_dict = load_config_from_file(Path(f.name))
+            config = dict_to_config(config_dict)
+
+        assert config.retry.request_timeout_sec == 12.5
+        # Other values should be default
+        assert config.retry.enabled is True
+        assert config.retry.max_attempts == 3
 
 
 class TestResponseConfig:

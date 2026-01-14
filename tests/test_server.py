@@ -35,8 +35,9 @@ def mock_config_auth_enabled(monkeypatch):
 
     monkeypatch.setattr("ddns_gateway.server.get_config", mock_get_config)
     monkeypatch.setattr("ddns_gateway.server._config", config)
-    # Initialize dedupe_cache in app.state to avoid AttributeError
+    # Initialize app.state to avoid AttributeError
     app.state.dedupe_cache = None
+    app.state.request_timeout_sec = 7.0
     return config
 
 
@@ -52,8 +53,9 @@ def mock_config_auth_disabled(monkeypatch):
 
     monkeypatch.setattr("ddns_gateway.server.get_config", mock_get_config)
     monkeypatch.setattr("ddns_gateway.server._config", config)
-    # Initialize dedupe_cache in app.state to avoid AttributeError
+    # Initialize app.state to avoid AttributeError
     app.state.dedupe_cache = None
+    app.state.request_timeout_sec = 7.0
     return config
 
 

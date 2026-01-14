@@ -133,16 +133,23 @@ class DedupeEntry:
         SHA256 of canonical request.
     timestamp : float
         Unix timestamp when entry was created.
-    base : CachedResponseBase
-        The cached response base (immutable).
+    base : CachedResponseBase | None
+        The cached response base (immutable). None when in_flight.
     in_flight : bool
-        Flag for Singleflight (Stage 4.2). True = request in progress.
+        Flag for Singleflight. True = request in progress.
+    in_flight_started_at : float | None
+        Timestamp when in_flight was set. Used for lease expiration.
+    _event : asyncio.Event | None
+        Event for waiters to wait on. Set when result is ready.
     """
 
     key_hash: str
     timestamp: float
-    base: CachedResponseBase
-    in_flight: bool = False  # Reserved for Stage 4.2
+    base: CachedResponseBase | None = None
+    in_flight: bool = False
+    in_flight_started_at: float | None = None
+    lease_sec: float | None = None  # Original lease duration for this entry
+    _event: asyncio.Event | None = field(default=None, repr=False)
 
 
 # =============================================================================
@@ -267,14 +274,25 @@ class DedupeCache:
         -----
         - Creates entry with current timestamp
         - Evicts oldest entry if at max_entries
+        - If replacing an in-flight entry, notifies waiters
         """
+        event_to_set: asyncio.Event | None = None
+
         async with self._lock:
             now = time.time()
+
+            # Grab event from existing in-flight entry (if any)
+            existing = self._entries.get(key_hash)
+            if existing is not None and existing.in_flight:
+                event_to_set = existing._event  # noqa: SLF001
+
             entry = DedupeEntry(
                 key_hash=key_hash,
                 timestamp=now,
                 base=base,
                 in_flight=False,
+                in_flight_started_at=None,
+                _event=None,
             )
 
             # Evict oldest entries if at capacity
@@ -295,7 +313,12 @@ class DedupeCache:
                 len(self._entries),
                 self._max_entries,
             )
-            return entry
+
+        # Notify waiters AFTER releasing lock
+        if event_to_set is not None:
+            event_to_set.set()
+
+        return entry
 
     async def delete(self, key_hash: str) -> bool:
         """
@@ -372,69 +395,164 @@ class DedupeCache:
             return len(self._entries)
 
     # =========================================================================
-    # Singleflight Interface (Stage 4.2 - Placeholder)
+    # Singleflight Interface (Stage 4.2)
     # =========================================================================
 
-    async def mark_in_flight(self, key_hash: str) -> bool:
+    async def mark_in_flight(
+        self,
+        key_hash: str,
+        lease_sec: float = 60.0,
+    ) -> bool:
         """
-        Mark a key as in-flight (request in progress).
+        Mark a key as in-flight (this request is the leader).
 
-        Reserved for Stage 4.2 Singleflight implementation.
+        If an in-flight entry exists and its lease hasn't expired, returns False
+        (another leader is processing). If lease has expired, allows takeover.
 
         Parameters
         ----------
         key_hash : str
             The dedupe key hash.
+        lease_sec : float
+            Lease duration in seconds. If in-flight entry is older than this,
+            allow takeover.
 
         Returns
         -------
         bool
-            True if successfully marked (was not already in-flight).
-            False if already in-flight (another request is processing).
+            True if successfully marked as leader.
+            False if already in-flight by another leader (should wait).
         """
-        # TODO(stage4.2): Implement Singleflight marking
-        _ = key_hash
-        return True
+        async with self._lock:
+            entry = self._entries.get(key_hash)
+            now = time.time()
+
+            # Case 1: Entry exists and is in-flight
+            if entry is not None and entry.in_flight:
+                # Check lease expiration using ENTRY's lease_sec
+                if (
+                    entry.in_flight_started_at is not None
+                    and entry.lease_sec is not None
+                ):
+                    age = now - entry.in_flight_started_at
+                    if age < entry.lease_sec:
+                        return False  # Lease still valid, cannot takeover
+                    # Lease expired, allow takeover
+                    logger.debug(
+                        "[dedupe] Lease expired for %s... (age=%.1fs > %.1fs), takeover",
+                        key_hash[:16],
+                        age,
+                        lease_sec,
+                    )
+                else:
+                    # Fallback: no timestamp, check by entry timestamp
+                    return False
+
+            # Case 2: Valid cache exists (not expired)
+            if entry is not None and not entry.in_flight:
+                if now - entry.timestamp <= self._window_seconds:
+                    return False  # Cache hit, no need to be leader
+
+            # Create in-flight placeholder
+            event = asyncio.Event()
+            self._entries[key_hash] = DedupeEntry(
+                key_hash=key_hash,
+                timestamp=now,
+                base=None,  # No result yet
+                in_flight=True,
+                in_flight_started_at=now,
+                lease_sec=lease_sec,  # Record lease for takeover check
+                _event=event,
+            )
+            self._entries.move_to_end(key_hash)
+            logger.debug("[dedupe] Marked in-flight: %s...", key_hash[:16])
+            return True
 
     async def clear_in_flight(self, key_hash: str) -> None:
         """
-        Clear the in-flight flag for a key.
+        Clear the in-flight flag without storing a result.
 
-        Reserved for Stage 4.2 Singleflight implementation.
+        Use when the leader request failed and there's no result to cache.
+        All waiters will be notified and will get None from wait_for_result.
 
         Parameters
         ----------
         key_hash : str
             The dedupe key hash.
         """
-        # TODO(stage4.2): Implement Singleflight clearing
-        _ = key_hash
+        event_to_set: asyncio.Event | None = None
+
+        async with self._lock:
+            entry = self._entries.get(key_hash)
+            if entry is None or not entry.in_flight:
+                return
+
+            event_to_set = entry._event  # noqa: SLF001
+            del self._entries[key_hash]
+            logger.debug("[dedupe] Cleared in-flight: %s...", key_hash[:16])
+
+        # Notify waiters AFTER releasing lock (they'll get None)
+        if event_to_set is not None:
+            event_to_set.set()
 
     async def wait_for_result(
         self,
         key_hash: str,
-        timeout: float = 30.0,
+        wait_timeout_sec: float = 30.0,
     ) -> DedupeEntry | None:
         """
         Wait for an in-flight request to complete.
 
-        Reserved for Stage 4.2 Singleflight implementation.
+        Returns the result if it becomes available within the timeout.
+        Returns None on timeout - the caller should return an error, NOT retry.
 
         Parameters
         ----------
         key_hash : str
             The dedupe key hash.
-        timeout : float
+        wait_timeout_sec : float
             Maximum time to wait in seconds.
 
         Returns
         -------
         DedupeEntry | None
-            The result entry or None on timeout.
+            The result entry if available, None on timeout or failure.
         """
-        # TODO(stage4.2): Implement Singleflight waiting
-        _ = key_hash, timeout
-        return None
+        # Get event under lock
+        event: asyncio.Event | None = None
+        async with self._lock:
+            entry = self._entries.get(key_hash)
+            if entry is None:
+                return None
+            if not entry.in_flight:
+                # Already ready (race condition - result arrived)
+                now = time.time()
+                if now - entry.timestamp <= self._window_seconds and entry.base:
+                    return entry
+                return None
+            event = entry._event  # noqa: SLF001
+
+        if event is None:
+            return None
+
+        # Wait outside lock to avoid deadlock
+        try:
+            await asyncio.wait_for(event.wait(), timeout=wait_timeout_sec)
+        except TimeoutError:
+            logger.debug(
+                "[dedupe] Wait timeout for %s... (%.1fs)",
+                key_hash[:16],
+                wait_timeout_sec,
+            )
+            return None
+
+        # Re-check for result after event is set
+        async with self._lock:
+            entry = self._entries.get(key_hash)
+            if entry is None or entry.in_flight or entry.base is None:
+                return None
+            logger.debug("[dedupe] Wait succeeded for %s...", key_hash[:16])
+            return entry
 
     # =========================================================================
     # Persistence Interface (Stage 4.3 - Placeholder)
@@ -606,6 +724,9 @@ def build_deduped_response(
         The caller should construct DDNSResponse from this.
     """
     base = entry.base
+    if base is None:
+        msg = "Cannot build deduped response from in-flight entry (base is None)"
+        raise ValueError(msg)
 
     # Build fresh meta (these are always new, never cached)
     fresh_meta = {

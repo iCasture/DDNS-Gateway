@@ -184,6 +184,7 @@ async def upsert_record_service(
     credentials: dict[str, str],
     *,
     dedupe_cache: DedupeCache | None = None,
+    timeout_sec: float | None = None,
 ) -> DDNSResponse:
     """
     Upsert (create or update) a DNS record.
@@ -221,6 +222,10 @@ async def upsert_record_service(
         The desired Cloudflare proxy status (CF only, A/AAAA/CNAME).
     credentials : dict[str, str]
         Provider credentials.
+    dedupe_cache : DedupeCache | None
+        Optional dedupe cache for request deduplication.
+    timeout_sec : float | None
+        Request timeout in seconds. `None` = use SDK/provider default.
 
     Returns
     -------
@@ -332,6 +337,7 @@ async def upsert_record_service(
             record=norm_record,
             record_type=record_type_enum,
             credentials=credentials,
+            timeout_sec=timeout_sec,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
@@ -368,6 +374,7 @@ async def upsert_record_service(
                 record_type=record_type_enum,
                 desired=desired,
                 credentials=credentials,
+                timeout_sec=timeout_sec,
             )
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
@@ -503,6 +510,7 @@ async def upsert_record_service(
             existing=existing,
             desired=desired,
             credentials=credentials,
+            timeout_sec=timeout_sec,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
@@ -595,6 +603,7 @@ async def delete_record_service(
     credentials: dict[str, str],
     *,
     dedupe_cache: DedupeCache | None = None,
+    timeout_sec: float | None = None,
 ) -> DDNSResponse:
     """
     Delete a DNS record.
@@ -623,6 +632,10 @@ async def delete_record_service(
         The record name (raw, will be normalized).
     credentials : dict[str, str]
         Provider credentials.
+    dedupe_cache : DedupeCache | None
+        Optional dedupe cache for request deduplication.
+    timeout_sec : float | None
+        Request timeout in seconds. `None` = use SDK/provider default.
 
     Returns
     -------
@@ -726,6 +739,7 @@ async def delete_record_service(
             record=norm_record,
             record_type=record_type_enum,
             credentials=credentials,
+            timeout_sec=timeout_sec,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
@@ -764,6 +778,7 @@ async def delete_record_service(
             zone=norm_zone,
             existing=existing,
             credentials=credentials,
+            timeout_sec=timeout_sec,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400

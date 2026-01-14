@@ -187,6 +187,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         _app.state.dedupe_cache = None
         logger.info("[lifespan] DedupeCache disabled")
 
+    # Store retry config values in app.state for service layer access
+    _app.state.request_timeout_sec = _config.retry.request_timeout_sec
+
     # Dynamically register "/health" endpoint (GET method) if enabled
     if _config.health.enabled:
         _app.add_api_route("/health", health, methods=["GET"])
@@ -655,6 +658,7 @@ async def upsert_ddns_record(
         proxied=final_proxied,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
+        timeout_sec=request.app.state.request_timeout_sec,
     )
 
     # Merge API-layer warnings into response
@@ -785,6 +789,7 @@ async def delete_ddns_record(
         record=record,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
+        timeout_sec=request.app.state.request_timeout_sec,
     )
 
     # Determine HTTP status code
