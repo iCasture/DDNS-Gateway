@@ -77,6 +77,7 @@ class AliyunProvider(BaseDNSProvider):
         record: str,
         record_type: RecordType,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> ExistingRecord | None:
         """
         Find an existing DNS record.
@@ -91,6 +92,8 @@ class AliyunProvider(BaseDNSProvider):
             The record type.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -110,7 +113,14 @@ class AliyunProvider(BaseDNSProvider):
             raise ProviderError(msg)
 
         client = self._create_client(access_key_id, access_key_secret)
-        runtime = util_models.RuntimeOptions()
+        if timeout_sec is not None:
+            timeout_ms = int(timeout_sec * 1000)
+            runtime = util_models.RuntimeOptions(
+                read_timeout=timeout_ms,
+                connect_timeout=timeout_ms,
+            )
+        else:
+            runtime = util_models.RuntimeOptions()
 
         records = await self._describe_records(
             client,
@@ -152,6 +162,7 @@ class AliyunProvider(BaseDNSProvider):
         record_type: RecordType,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Create a new DNS record.
@@ -168,6 +179,8 @@ class AliyunProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -185,7 +198,14 @@ class AliyunProvider(BaseDNSProvider):
             )
 
         client = self._create_client(access_key_id, access_key_secret)
-        runtime = util_models.RuntimeOptions()
+        if timeout_sec is not None:
+            timeout_ms = int(timeout_sec * 1000)
+            runtime = util_models.RuntimeOptions(
+                read_timeout=timeout_ms,
+                connect_timeout=timeout_ms,
+            )
+        else:
+            runtime = util_models.RuntimeOptions()
 
         try:
             request = alidns_models.AddDomainRecordRequest(
@@ -255,6 +275,7 @@ class AliyunProvider(BaseDNSProvider):
         existing: ExistingRecord,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Update an existing DNS record.
@@ -272,6 +293,8 @@ class AliyunProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -290,7 +313,14 @@ class AliyunProvider(BaseDNSProvider):
             )
 
         client = self._create_client(access_key_id, access_key_secret)
-        runtime = util_models.RuntimeOptions()
+        if timeout_sec is not None:
+            timeout_ms = int(timeout_sec * 1000)
+            runtime = util_models.RuntimeOptions(
+                read_timeout=timeout_ms,
+                connect_timeout=timeout_ms,
+            )
+        else:
+            runtime = util_models.RuntimeOptions()
 
         # Get record type from raw data
         record_type = existing.raw.get("type", "")
@@ -381,6 +411,7 @@ class AliyunProvider(BaseDNSProvider):
         zone: str,
         existing: ExistingRecord,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Delete an existing DNS record.
@@ -396,6 +427,8 @@ class AliyunProvider(BaseDNSProvider):
             The existing record to delete.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -414,7 +447,14 @@ class AliyunProvider(BaseDNSProvider):
             )
 
         client = self._create_client(access_key_id, access_key_secret)
-        runtime = util_models.RuntimeOptions()
+        if timeout_sec is not None:
+            timeout_ms = int(timeout_sec * 1000)
+            runtime = util_models.RuntimeOptions(
+                read_timeout=timeout_ms,
+                connect_timeout=timeout_ms,
+            )
+        else:
+            runtime = util_models.RuntimeOptions()
 
         try:
             request = alidns_models.DeleteDomainRecordRequest(

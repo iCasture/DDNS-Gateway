@@ -52,6 +52,7 @@ class TencentProvider(BaseDNSProvider):
         self,
         secret_id: str,
         secret_key: str,
+        timeout_sec: float | None = None,
     ) -> dnspod_client_async.DnspodClient:
         """
         Create a Tencent Cloud DNSPod client.
@@ -62,6 +63,8 @@ class TencentProvider(BaseDNSProvider):
             Tencent Cloud Secret ID.
         secret_key : str
             Tencent Cloud Secret Key.
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -71,6 +74,8 @@ class TencentProvider(BaseDNSProvider):
         cred = credential.Credential(secret_id, secret_key)
         http_profile = HttpProfile()
         http_profile.endpoint = DNSPOD_ENDPOINT
+        if timeout_sec is not None:
+            http_profile.reqTimeout = int(timeout_sec)
 
         client_profile = ClientProfile()
         client_profile.httpProfile = http_profile
@@ -83,6 +88,7 @@ class TencentProvider(BaseDNSProvider):
         record: str,
         record_type: RecordType,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> ExistingRecord | None:
         """
         Find an existing DNS record.
@@ -97,6 +103,8 @@ class TencentProvider(BaseDNSProvider):
             The record type.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -115,7 +123,7 @@ class TencentProvider(BaseDNSProvider):
             msg = "Missing required credentials: id and secret"
             raise ProviderError(msg)
 
-        client = self._create_client(secret_id, secret_key)
+        client = self._create_client(secret_id, secret_key, timeout_sec)
         records = await self._describe_records(client, zone, record, record_type)
 
         if records is None:
@@ -150,6 +158,7 @@ class TencentProvider(BaseDNSProvider):
         record_type: RecordType,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Create a new DNS record.
@@ -166,6 +175,8 @@ class TencentProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -182,7 +193,7 @@ class TencentProvider(BaseDNSProvider):
                 message="Missing required credentials: id and secret",
             )
 
-        client = self._create_client(secret_id, secret_key)
+        client = self._create_client(secret_id, secret_key, timeout_sec)
 
         try:
             request = models.CreateRecordRequest()
@@ -231,6 +242,7 @@ class TencentProvider(BaseDNSProvider):
         existing: ExistingRecord,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Update an existing DNS record.
@@ -245,6 +257,8 @@ class TencentProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -261,7 +275,7 @@ class TencentProvider(BaseDNSProvider):
                 message="Missing required credentials: id and secret",
             )
 
-        client = self._create_client(secret_id, secret_key)
+        client = self._create_client(secret_id, secret_key, timeout_sec)
 
         # Get record type from raw data
         record_type = existing.raw.get("type", "")
@@ -329,6 +343,7 @@ class TencentProvider(BaseDNSProvider):
         zone: str,
         existing: ExistingRecord,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Delete an existing DNS record.
@@ -341,6 +356,8 @@ class TencentProvider(BaseDNSProvider):
             The existing record to delete.
         credentials : dict[str, str]
             Must contain "id" and "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use SDK default.
 
         Returns
         -------
@@ -357,7 +374,7 @@ class TencentProvider(BaseDNSProvider):
                 message="Missing required credentials: id and secret",
             )
 
-        client = self._create_client(secret_id, secret_key)
+        client = self._create_client(secret_id, secret_key, timeout_sec)
 
         try:
             request = models.DeleteRecordRequest()

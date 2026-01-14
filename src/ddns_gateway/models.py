@@ -147,6 +147,8 @@ class ErrorCode(StrEnum):
         Upstream provider API returned an error.
     INTERNAL_ERROR : str
         Internal server error.
+    SINGLEFLIGHT_WAIT_TIMEOUT : str
+        Singleflight wait timeout - another request is in progress.
     """
 
     # Validation errors
@@ -173,6 +175,9 @@ class ErrorCode(StrEnum):
 
     # Internal errors
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+    # Singleflight errors
+    SINGLEFLIGHT_WAIT_TIMEOUT = "SINGLEFLIGHT_WAIT_TIMEOUT"
 
 
 # =============================================================================

@@ -74,6 +74,7 @@ class BaseDNSProvider(ABC):
         record: str,
         record_type: RecordType,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> ExistingRecord | None:
         """
         Find an existing DNS record.
@@ -88,6 +89,8 @@ class BaseDNSProvider(ABC):
             The record type.
         credentials : dict[str, str]
             Provider-specific credentials.
+        timeout_sec : float | None
+            HTTP request timeout in seconds. `None` = use SDK/provider default.
 
         Returns
         -------
@@ -110,6 +113,7 @@ class BaseDNSProvider(ABC):
         record_type: RecordType,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Create a new DNS record.
@@ -126,6 +130,8 @@ class BaseDNSProvider(ABC):
             The desired state for the record.
         credentials : dict[str, str]
             Provider-specific credentials.
+        timeout_sec : float | None
+            HTTP request timeout in seconds. `None` = use SDK/provider default.
 
         Returns
         -------
@@ -141,6 +147,7 @@ class BaseDNSProvider(ABC):
         existing: ExistingRecord,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Update an existing DNS record.
@@ -155,6 +162,8 @@ class BaseDNSProvider(ABC):
             The desired state for the record.
         credentials : dict[str, str]
             Provider-specific credentials.
+        timeout_sec : float | None
+            HTTP request timeout in seconds. `None` = use SDK/provider default.
 
         Returns
         -------
@@ -169,6 +178,7 @@ class BaseDNSProvider(ABC):
         zone: str,
         existing: ExistingRecord,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Delete an existing DNS record.
@@ -181,6 +191,8 @@ class BaseDNSProvider(ABC):
             The existing record to delete.
         credentials : dict[str, str]
             Provider-specific credentials.
+        timeout_sec : float | None
+            HTTP request timeout in seconds. `None` = use SDK/provider default.
 
         Returns
         -------

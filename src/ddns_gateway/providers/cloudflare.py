@@ -27,9 +27,6 @@ if TYPE_CHECKING:
 # CloudFlare API base URL
 CF_API_BASE: Final[str] = "https://api.cloudflare.com/client/v4"
 
-# HTTP timeout in seconds
-HTTP_TIMEOUT: Final[float] = 30.0
-
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +50,7 @@ class CloudFlareProvider(BaseDNSProvider):
         record: str,
         record_type: RecordType,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> ExistingRecord | None:
         """
         Find an existing DNS record.
@@ -67,6 +65,8 @@ class CloudFlareProvider(BaseDNSProvider):
             The record type.
         credentials : dict[str, str]
             Must contain "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use `httpx` default.
 
         Returns
         -------
@@ -90,7 +90,7 @@ class CloudFlareProvider(BaseDNSProvider):
 
         fqdn = self.build_fqdn(zone, record)
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
             # Get Zone ID
             zone_id = await self._get_zone_id(client, headers, zone)
             if zone_id is None:
@@ -142,6 +142,7 @@ class CloudFlareProvider(BaseDNSProvider):
         record_type: RecordType,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Create a new DNS record.
@@ -158,6 +159,8 @@ class CloudFlareProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use `httpx` default.
 
         Returns
         -------
@@ -179,7 +182,7 @@ class CloudFlareProvider(BaseDNSProvider):
 
         fqdn = self.build_fqdn(zone, record)
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
             # Get Zone ID
             zone_id = await self._get_zone_id(client, headers, zone)
             if zone_id is None:
@@ -264,6 +267,7 @@ class CloudFlareProvider(BaseDNSProvider):
         existing: ExistingRecord,
         desired: DesiredState,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Update an existing DNS record.
@@ -281,6 +285,8 @@ class CloudFlareProvider(BaseDNSProvider):
             The desired state for the record.
         credentials : dict[str, str]
             Must contain "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use `httpx` default.
 
         Returns
         -------
@@ -350,7 +356,7 @@ class CloudFlareProvider(BaseDNSProvider):
             payload["comment"] = desired.comment
 
         try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
                 response = await client.patch(url, headers=headers, json=payload)
                 logger.debug("[cloudflare] PATCH %s -> %d", url, response.status_code)
                 logger.debug("[cloudflare] Response: %s", response.text)
@@ -403,6 +409,7 @@ class CloudFlareProvider(BaseDNSProvider):
         zone: str,
         existing: ExistingRecord,
         credentials: dict[str, str],
+        timeout_sec: float | None = None,
     ) -> UpstreamResult:
         """
         Delete an existing DNS record.
@@ -418,6 +425,8 @@ class CloudFlareProvider(BaseDNSProvider):
             The existing record to delete.
         credentials : dict[str, str]
             Must contain "secret".
+        timeout_sec : float | None
+            Request timeout in seconds. `None` = use `httpx` default.
 
         Returns
         -------
@@ -444,7 +453,7 @@ class CloudFlareProvider(BaseDNSProvider):
         record_name = existing.raw.get("name", "")
 
         try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
                 response = await client.delete(url, headers=headers)
                 logger.debug("[cloudflare] DELETE %s -> %d", url, response.status_code)
                 logger.debug("[cloudflare] Response: %s", response.text)
