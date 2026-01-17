@@ -171,7 +171,7 @@ class TestUpstreamResult:
         """Test creating an UpstreamResult with warnings."""
         warnings = [
             WarningModel(
-                code=WarningCode.CF_PROXIED_IGNORED_FOR_TXT,
+                code=WarningCode.PROXIED_IGNORED,
                 message="Proxied ignored for TXT",
             ),
         ]
@@ -182,7 +182,7 @@ class TestUpstreamResult:
             warnings=warnings,
         )
         assert len(result.warnings) == 1
-        assert result.warnings[0].code == WarningCode.CF_PROXIED_IGNORED_FOR_TXT
+        assert result.warnings[0].code == WarningCode.PROXIED_IGNORED
 
     def test_result_with_all_fields(self):
         """Test creating an UpstreamResult with all optional fields."""

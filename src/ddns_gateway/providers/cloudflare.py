@@ -528,8 +528,11 @@ class CloudFlareProvider(BaseDNSProvider):
             if proxied is True:
                 warnings.append(
                     WarningModel(
-                        code=WarningCode.CF_PROXIED_IGNORED_FOR_TXT,
-                        message="Proxied parameter ignored for TXT records",
+                        code=WarningCode.PROXIED_IGNORED,
+                        message=(
+                            "The 'proxied' parameter is only supported for A/AAAA/CNAME records "
+                            "and is ignored for the current record type."
+                        ),
                         field="proxied",
                     ),
                 )
