@@ -4,12 +4,19 @@ Service layer for DDNS Gateway.
 This module provides the core business logic for DNS record operations,
 orchestrating the flow between normalization, provider calls, and response
 building.
+
+Debug Information
+-----------------
+When ``include_debug_info=True``, the service layer collects raw input
+parameters and their normalized forms, returning them in the response's
+``debug`` field. This is controlled by the ``response.include_debug_info``
+configuration option and is disabled by default for security reasons.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ddns_gateway.dedupe import (
     build_deduped_response,
@@ -18,6 +25,7 @@ from ddns_gateway.dedupe import (
 )
 from ddns_gateway.models import (
     DDNSResponse,
+    DebugInfo,
     DedupeInfo,
     EffectiveValues,
     ErrorCode,
@@ -55,6 +63,59 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _build_debug_dict(
+    *,
+    zone: str,
+    record: str,
+    record_type: str,
+    value: str | None = None,
+    ttl: int | None = None,
+    comment: str | None = None,
+    proxied: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Build a dictionary for debug info (raw_input or normalized).
+
+    Only includes optional fields if they are not None.
+
+    Parameters
+    ----------
+    zone : str
+        The zone value.
+    record : str
+        The record value.
+    record_type : str
+        The record type value.
+    value : str | None
+        The record value (for upsert operations).
+    ttl : int | None
+        The TTL value.
+    comment : str | None
+        The comment value.
+    proxied : bool | None
+        The proxied value (Cloudflare only, A/AAAA/CNAME).
+
+    Returns
+    -------
+    dict[str, Any]
+        The debug dictionary with non-None fields.
+    """
+    result: dict[str, Any] = {
+        "zone": zone,
+        "record": record,
+        "type": record_type,
+    }
+    if value is not None:
+        result["value"] = value
+    if ttl is not None:
+        result["ttl"] = ttl
+    if comment is not None:
+        result["comment"] = comment
+    if proxied is not None:
+        result["proxied"] = proxied
+    return result
+
+
 def _build_error_response(
     provider: str,
     zone: str,
@@ -63,6 +124,9 @@ def _build_error_response(
     error: ErrorModel,
     *,
     warnings: list[WarningModel] | None = None,
+    include_debug_info: bool = False,
+    raw_input: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
 ) -> DDNSResponse:
     """
     Build an error DDNSResponse.
@@ -81,12 +145,22 @@ def _build_error_response(
         The error to include.
     warnings : list[WarningModel] | None
         Optional warnings to include.
+    include_debug_info : bool
+        Whether to include debug information in the response.
+    raw_input : dict[str, Any] | None
+        Raw input dictionary for debug info.
+    normalized : dict[str, Any] | None
+        Normalized dictionary for debug info (may be None for validation errors).
 
     Returns
     -------
     DDNSResponse
         The error response.
     """
+    debug: DebugInfo | None = None
+    if include_debug_info and raw_input is not None:
+        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
+
     return DDNSResponse(
         status="error",
         action=None,
@@ -97,7 +171,7 @@ def _build_error_response(
         warnings=warnings or [],
         errors=[error],
         meta=ResponseMeta(),
-        debug=None,
+        debug=debug,
     )
 
 
@@ -113,6 +187,9 @@ def _build_success_response(
     upstream: UpstreamInfo | None = None,
     previous_value: str | None = None,
     warnings: list[WarningModel] | None = None,
+    include_debug_info: bool = False,
+    raw_input: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
 ) -> DDNSResponse:
     """
     Build a success DDNSResponse.
@@ -139,6 +216,12 @@ def _build_success_response(
         The previous value (for updates).
     warnings : list[WarningModel] | None
         Optional warnings to include.
+    include_debug_info : bool
+        Whether to include debug information in the response.
+    raw_input : dict[str, Any] | None
+        Raw input dictionary for debug info.
+    normalized : dict[str, Any] | None
+        Normalized dictionary for debug info.
 
     Returns
     -------
@@ -153,6 +236,10 @@ def _build_success_response(
             previous_value=previous_value,
         )
 
+    debug: DebugInfo | None = None
+    if include_debug_info and raw_input is not None:
+        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
+
     return DDNSResponse(
         status="success",
         action=action,  # type: ignore[arg-type]
@@ -163,7 +250,85 @@ def _build_success_response(
         warnings=warnings or [],
         errors=[],
         meta=ResponseMeta(),
-        debug=None,
+        debug=debug,
+    )
+
+
+def _build_deduped_response(
+    resp_dict: dict[str, Any],
+    window_seconds: int,
+    *,
+    include_debug_info: bool = False,
+    raw_input: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
+) -> DDNSResponse:
+    """
+    Build DDNSResponse from a deduped response dictionary.
+
+    Parameters
+    ----------
+    resp_dict : dict[str, Any]
+        The response dictionary from ``build_deduped_response``.
+    window_seconds : int
+        The dedupe window used for meta.dedupe.window_sec.
+    include_debug_info : bool
+        Whether to include debug information in the response.
+    raw_input : dict[str, Any] | None
+        Raw input dictionary for debug info.
+    normalized : dict[str, Any] | None
+        Normalized dictionary for debug info.
+
+    Returns
+    -------
+    DDNSResponse
+        The deduped response.
+    """
+    result: ResultInfo | None = None
+    if resp_dict.get("result"):
+        upstream = None
+        if resp_dict["result"].get("upstream"):
+            upstream = UpstreamInfo(**resp_dict["result"]["upstream"])
+        result = ResultInfo(
+            effective=EffectiveValues(**resp_dict["result"]["effective"]),
+            upstream=upstream,
+            previous_value=resp_dict["result"].get("previous_value"),
+        )
+
+    debug: DebugInfo | None = None
+    if include_debug_info and raw_input is not None:
+        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
+
+    # Convert warnings to WarningModel objects (they may be dicts from build_deduped_response)
+    warnings_list: list[WarningModel] = []
+    for w in resp_dict.get("warnings", []):
+        if isinstance(w, WarningModel):
+            warnings_list.append(w)
+        elif isinstance(w, dict):
+            warnings_list.append(WarningModel(**w))
+        else:
+            # Fallback: try to construct from whatever we have
+            warnings_list.append(
+                WarningModel(**w)
+                if hasattr(w, "__dict__")
+                else WarningModel(code=str(w), message=str(w)),
+            )
+
+    return DDNSResponse(
+        status=resp_dict["status"],
+        action=resp_dict["action"],
+        upstream_called=resp_dict["upstream_called"],
+        provider=resp_dict["provider"],
+        record=RecordInfo(**resp_dict["record"]),
+        result=result,
+        warnings=warnings_list,
+        errors=resp_dict["errors"],
+        meta=ResponseMeta(
+            dedupe=DedupeInfo(
+                hit=True,
+                window_sec=window_seconds,
+            ),
+        ),
+        debug=debug,
     )
 
 
@@ -187,6 +352,7 @@ async def upsert_record_service(
     dedupe_cache: DedupeCache | None = None,
     dedupe_config: DedupeConfig | None = None,
     timeout_sec: float | None = None,
+    include_debug_info: bool = False,
 ) -> DDNSResponse:
     """
     Upsert (create or update) a DNS record.
@@ -226,8 +392,13 @@ async def upsert_record_service(
         Provider credentials.
     dedupe_cache : DedupeCache | None
         Optional dedupe cache for request deduplication.
+    dedupe_config : DedupeConfig | None
+        Optional dedupe configuration for singleflight settings.
     timeout_sec : float | None
         Request timeout in seconds. `None` = use SDK/provider default.
+    include_debug_info : bool
+        Whether to include debug information (raw input, normalized) in response.
+        Controlled by ``response.include_debug_info`` config option.
 
     Returns
     -------
@@ -235,6 +406,17 @@ async def upsert_record_service(
         The operation response.
     """
     warnings: list[WarningModel] = []
+
+    # Build raw input for debug (before normalization)
+    raw_input = _build_debug_dict(
+        zone=zone,
+        record=record,
+        record_type=record_type,
+        value=value,
+        ttl=ttl,
+        comment=comment,
+        proxied=proxied,
+    )
 
     # -------------------------------------------------------------------------
     # Step 1: Normalize inputs
@@ -257,6 +439,9 @@ async def upsert_record_service(
                     message=f"Invalid record type: {record_type}",
                     field="type",
                 ),
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=None,
             )
 
         norm_value = normalize_value(value, record_type_enum.value)
@@ -274,12 +459,25 @@ async def upsert_record_service(
                 message=e.message,
                 field=e.field,
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=None,
         )
+
+    # Build normalized for debug (after successful normalization)
+    normalized = _build_debug_dict(
+        zone=norm_zone,
+        record=norm_record,
+        record_type=record_type_enum.value,
+        value=norm_value,
+        ttl=norm_ttl,
+        comment=norm_comment,
+        proxied=proxied,
+    )
 
     # -------------------------------------------------------------------------
     # Step 2-3: Dedupe cache check
     # -------------------------------------------------------------------------
-    # Import dedupe functions (only when cache is enabled to avoid circular import)
     dedupe_key: str | None = None
     if dedupe_cache is not None:
         dedupe_key = compute_dedupe_key(
@@ -302,32 +500,12 @@ async def upsert_record_service(
             )
             # Build response from cache
             resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
-            return DDNSResponse(
-                status=resp_dict["status"],
-                action=resp_dict["action"],
-                upstream_called=resp_dict["upstream_called"],
-                provider=resp_dict["provider"],
-                record=RecordInfo(**resp_dict["record"]),
-                result=ResultInfo(
-                    effective=EffectiveValues(**resp_dict["result"]["effective"]),
-                    upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
-                    if resp_dict["result"] and resp_dict["result"].get("upstream")
-                    else None,
-                    previous_value=resp_dict["result"].get("previous_value")
-                    if resp_dict["result"]
-                    else None,
-                )
-                if resp_dict["result"]
-                else None,
-                warnings=resp_dict["warnings"],
-                errors=resp_dict["errors"],
-                meta=ResponseMeta(
-                    dedupe=DedupeInfo(
-                        hit=True,
-                        window_sec=dedupe_cache.window_seconds,
-                    ),
-                ),
-                debug=None,
+            return _build_deduped_response(
+                resp_dict,
+                dedupe_cache.window_seconds,
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
     # -------------------------------------------------------------------------
@@ -354,34 +532,15 @@ async def upsert_record_service(
             if sf_result is not None and sf_result.base is not None:
                 # Leader completed, use their result
                 resp_dict = build_deduped_response(
-                    sf_result, dedupe_cache.window_seconds
+                    sf_result,
+                    dedupe_cache.window_seconds,
                 )
-                return DDNSResponse(
-                    status=resp_dict["status"],
-                    action=resp_dict["action"],
-                    upstream_called=resp_dict["upstream_called"],
-                    provider=resp_dict["provider"],
-                    record=RecordInfo(**resp_dict["record"]),
-                    result=ResultInfo(
-                        effective=EffectiveValues(**resp_dict["result"]["effective"]),
-                        upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
-                        if resp_dict["result"] and resp_dict["result"].get("upstream")
-                        else None,
-                        previous_value=resp_dict["result"].get("previous_value")
-                        if resp_dict["result"]
-                        else None,
-                    )
-                    if resp_dict["result"]
-                    else None,
-                    warnings=resp_dict["warnings"],
-                    errors=resp_dict["errors"],
-                    meta=ResponseMeta(
-                        dedupe=DedupeInfo(
-                            hit=True,
-                            window_sec=dedupe_cache.window_seconds,
-                        ),
-                    ),
-                    debug=None,
+                return _build_deduped_response(
+                    resp_dict,
+                    dedupe_cache.window_seconds,
+                    include_debug_info=include_debug_info,
+                    raw_input=raw_input,
+                    normalized=normalized,
                 )
 
             # Wait timeout - return error (DO NOT retry)
@@ -398,6 +557,9 @@ async def upsert_record_service(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
                 ),
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
     # -------------------------------------------------------------------------
@@ -428,6 +590,9 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # Build desired state
@@ -468,6 +633,9 @@ async def upsert_record_service(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=f"Failed to create record: {e}",
                 ),
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
         if not result.success:
@@ -484,6 +652,9 @@ async def upsert_record_service(
                     message=result.message,
                 ),
                 warnings=result.warnings,
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
         # Update dedupe cache
@@ -528,6 +699,9 @@ async def upsert_record_service(
                 http_status=result.http_status,
             ),
             warnings=result.warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # -------------------------------------------------------------------------
@@ -582,6 +756,9 @@ async def upsert_record_service(
                 record_id=existing.record_id,
                 zone_id=existing.zone_id,
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # Update record
@@ -610,6 +787,9 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to update record: {e}",
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     if not result.success:
@@ -626,6 +806,9 @@ async def upsert_record_service(
                 message=result.message,
             ),
             warnings=result.warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # Compute effective values for cache
@@ -678,6 +861,9 @@ async def upsert_record_service(
         ),
         previous_value=existing_value if value_changed else None,
         warnings=result.warnings,
+        include_debug_info=include_debug_info,
+        raw_input=raw_input,
+        normalized=normalized,
     )
 
 
@@ -692,6 +878,7 @@ async def delete_record_service(
     dedupe_cache: DedupeCache | None = None,
     dedupe_config: DedupeConfig | None = None,
     timeout_sec: float | None = None,
+    include_debug_info: bool = False,
 ) -> DDNSResponse:
     """
     Delete a DNS record.
@@ -722,14 +909,26 @@ async def delete_record_service(
         Provider credentials.
     dedupe_cache : DedupeCache | None
         Optional dedupe cache for request deduplication.
+    dedupe_config : DedupeConfig | None
+        Optional dedupe configuration for singleflight settings.
     timeout_sec : float | None
         Request timeout in seconds. `None` = use SDK/provider default.
+    include_debug_info : bool
+        Whether to include debug information (raw input, normalized) in response.
+        Controlled by ``response.include_debug_info`` config option.
 
     Returns
     -------
     DDNSResponse
         The operation response.
     """
+    # Build raw input for debug (before normalization)
+    raw_input = _build_debug_dict(
+        zone=zone,
+        record=record,
+        record_type=record_type,
+    )
+
     # -------------------------------------------------------------------------
     # Step 1: Normalize inputs
     # -------------------------------------------------------------------------
@@ -751,6 +950,9 @@ async def delete_record_service(
                     message=f"Invalid record type: {record_type}",
                     field="type",
                 ),
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=None,
             )
 
     except NormalizeError as e:
@@ -764,7 +966,17 @@ async def delete_record_service(
                 message=e.message,
                 field=e.field,
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=None,
         )
+
+    # Build normalized for debug (after successful normalization)
+    normalized = _build_debug_dict(
+        zone=norm_zone,
+        record=norm_record,
+        record_type=record_type_enum.value,
+    )
 
     # -------------------------------------------------------------------------
     # Step 2-3: Dedupe cache check
@@ -790,32 +1002,12 @@ async def delete_record_service(
                 dedupe_key[:16],
             )
             resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
-            return DDNSResponse(
-                status=resp_dict["status"],
-                action=resp_dict["action"],
-                upstream_called=resp_dict["upstream_called"],
-                provider=resp_dict["provider"],
-                record=RecordInfo(**resp_dict["record"]),
-                result=ResultInfo(
-                    effective=EffectiveValues(**resp_dict["result"]["effective"]),
-                    upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
-                    if resp_dict["result"] and resp_dict["result"].get("upstream")
-                    else None,
-                    previous_value=resp_dict["result"].get("previous_value")
-                    if resp_dict["result"]
-                    else None,
-                )
-                if resp_dict["result"]
-                else None,
-                warnings=resp_dict["warnings"],
-                errors=resp_dict["errors"],
-                meta=ResponseMeta(
-                    dedupe=DedupeInfo(
-                        hit=True,
-                        window_sec=dedupe_cache.window_seconds,
-                    ),
-                ),
-                debug=None,
+            return _build_deduped_response(
+                resp_dict,
+                dedupe_cache.window_seconds,
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
     # -------------------------------------------------------------------------
@@ -842,34 +1034,15 @@ async def delete_record_service(
             if sf_result is not None and sf_result.base is not None:
                 # Leader completed, use their result
                 resp_dict = build_deduped_response(
-                    sf_result, dedupe_cache.window_seconds
+                    sf_result,
+                    dedupe_cache.window_seconds,
                 )
-                return DDNSResponse(
-                    status=resp_dict["status"],
-                    action=resp_dict["action"],
-                    upstream_called=resp_dict["upstream_called"],
-                    provider=resp_dict["provider"],
-                    record=RecordInfo(**resp_dict["record"]),
-                    result=ResultInfo(
-                        effective=EffectiveValues(**resp_dict["result"]["effective"]),
-                        upstream=UpstreamInfo(**resp_dict["result"]["upstream"])
-                        if resp_dict["result"] and resp_dict["result"].get("upstream")
-                        else None,
-                        previous_value=resp_dict["result"].get("previous_value")
-                        if resp_dict["result"]
-                        else None,
-                    )
-                    if resp_dict["result"]
-                    else None,
-                    warnings=resp_dict["warnings"],
-                    errors=resp_dict["errors"],
-                    meta=ResponseMeta(
-                        dedupe=DedupeInfo(
-                            hit=True,
-                            window_sec=dedupe_cache.window_seconds,
-                        ),
-                    ),
-                    debug=None,
+                return _build_deduped_response(
+                    resp_dict,
+                    dedupe_cache.window_seconds,
+                    include_debug_info=include_debug_info,
+                    raw_input=raw_input,
+                    normalized=normalized,
                 )
 
             # Wait timeout - return error (DO NOT retry)
@@ -886,6 +1059,9 @@ async def delete_record_service(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
                 ),
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
 
     # -------------------------------------------------------------------------
@@ -916,6 +1092,9 @@ async def delete_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # -------------------------------------------------------------------------
@@ -929,6 +1108,9 @@ async def delete_record_service(
             record=norm_record,
             action="unchanged",
             upstream_called=False,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # -------------------------------------------------------------------------
@@ -958,6 +1140,9 @@ async def delete_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to delete record: {e}",
             ),
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     if not result.success:
@@ -974,6 +1159,9 @@ async def delete_record_service(
                 message=result.message,
             ),
             warnings=result.warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
         )
 
     # Update dedupe cache
@@ -1012,4 +1200,7 @@ async def delete_record_service(
             http_status=result.http_status,
         ),
         warnings=result.warnings,
+        include_debug_info=include_debug_info,
+        raw_input=raw_input,
+        normalized=normalized,
     )

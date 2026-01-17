@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette import status as st_status
 
@@ -11,17 +10,16 @@ from ddns_gateway.config import (
     AuthConfig,
     Config,
     HealthConfig,
-    ServerConfig,
 )
-from ddns_gateway.server import app, lifespan, parse_upstream_auth
+from ddns_gateway.server import create_app, parse_upstream_auth
 
 
 class TestAuthMiddleware:
     """Tests for authentication middleware using Authorization header."""
 
-    def test_missing_token_returns_401(self, client, mock_config_auth_enabled):
+    def test_missing_token_returns_401(self, client_auth_enabled):
         """Test that missing Authorization header returns 401."""
-        response = client.put(
+        response = client_auth_enabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
         )
@@ -31,9 +29,9 @@ class TestAuthMiddleware:
         assert data["status"] == "error"
         assert any(e["code"] == "MISSING_AUTH_TOKEN" for e in data["errors"])
 
-    def test_invalid_token_returns_403(self, client, mock_config_auth_enabled):
+    def test_invalid_token_returns_403(self, client_auth_enabled):
         """Test that invalid Bearer token returns 403."""
-        response = client.put(
+        response = client_auth_enabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
             headers={"Authorization": "Bearer invalid-token"},
@@ -44,9 +42,9 @@ class TestAuthMiddleware:
         assert data["status"] == "error"
         assert any(e["code"] == "INVALID_AUTH_TOKEN" for e in data["errors"])
 
-    def test_valid_token_passes_auth(self, client, mock_config_auth_enabled):
+    def test_valid_token_passes_auth(self, client_auth_enabled):
         """Test that valid Bearer token passes authentication (may fail at provider)."""
-        response = client.put(
+        response = client_auth_enabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
             headers={"Authorization": "Bearer valid-token"},
@@ -58,9 +56,9 @@ class TestAuthMiddleware:
             st_status.HTTP_403_FORBIDDEN,
         ]
 
-    def test_auth_disabled_allows_request(self, client, mock_config_auth_disabled):
+    def test_auth_disabled_allows_request(self, client_auth_disabled):
         """Test that auth disabled allows request without Authorization header."""
-        response = client.put(
+        response = client_auth_disabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
         )
@@ -71,9 +69,9 @@ class TestAuthMiddleware:
             st_status.HTTP_403_FORBIDDEN,
         ]
 
-    def test_bearer_token_case_insensitive(self, client, mock_config_auth_enabled):
+    def test_bearer_token_case_insensitive(self, client_auth_enabled):
         """Test that 'bearer' prefix is case-insensitive."""
-        response = client.put(
+        response = client_auth_enabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
             headers={"Authorization": "BEARER valid-token"},
@@ -86,23 +84,22 @@ class TestAuthMiddleware:
         ]
 
 
-@pytest.mark.usefixtures("mock_config_auth_disabled")
 class TestValidationErrorHandler:
     """Tests for validation error handling."""
 
-    def test_missing_value_returns_400(self, client):
+    def test_missing_value_returns_400(self, client_auth_disabled):
         """Test that missing value parameter returns 400."""
         # PUT without value in body or query
-        response = client.put("/v1/ddns/cloudflare/example.com/A/home")
+        response = client_auth_disabled.put("/v1/ddns/cloudflare/example.com/A/home")
 
         assert response.status_code == st_status.HTTP_400_BAD_REQUEST
         data = response.json()
         assert data["status"] == "error"
         assert any("value" in e.get("field", "") for e in data["errors"])
 
-    def test_invalid_provider_returns_400(self, client):
+    def test_invalid_provider_returns_400(self, client_auth_disabled):
         """Test that invalid provider returns 400."""
-        response = client.put(
+        response = client_auth_disabled.put(
             "/v1/ddns/invalid_provider/example.com/A/home",
             json={"value": "1.2.3.4"},
         )
@@ -112,7 +109,7 @@ class TestValidationErrorHandler:
         assert data["status"] == "error"
         assert any(e["code"] == "INVALID_PROVIDER" for e in data["errors"])
 
-    def test_missing_body_params_returns_422(self, client):
+    def test_missing_body_params_returns_422(self, client_auth_disabled):
         """Test that missing parameters returns 422 with clear message."""
         # Send empty body - but body is optional, so it falls back to query.
         # To trigger 422, we need to send a body that is invalid (e.g. strict type check)
@@ -120,7 +117,7 @@ class TestValidationErrorHandler:
         # But UpsertRequest fields are defaults or None... wait.
         # UpsertRequest: value is required.
         # If we send json={}, value is missing.
-        response = client.put(
+        response = client_auth_disabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={},  # Empty body, should fail Pydantic validation for 'value'
         )
@@ -132,7 +129,7 @@ class TestValidationErrorHandler:
         assert data["errors"][0]["code"] == "VALIDATION_ERROR"
         assert "Missing required fields: value" in data["errors"][0]["message"]
 
-    def test_partial_body_params_correctly_lists_missing(self, client):
+    def test_partial_body_params_correctly_lists_missing(self, client_auth_disabled):
         """Test that partial parameters correctly lists only missing ones."""
         # 'value' is the only required field in UpsertRequest.
         # So missing it is the main case.
@@ -145,7 +142,7 @@ class TestValidationErrorHandler:
         # However, the user asked for "lists only missing ones".
         # If I had more required fields, this would be relevant.
         # I'll stick to testing the message format.
-        response = client.put(
+        response = client_auth_disabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={},
         )
@@ -157,13 +154,12 @@ class TestValidationErrorHandler:
         assert "comment" not in msg  # Optional
 
 
-@pytest.mark.usefixtures("mock_config_auth_enabled")
 class TestDeleteEndpoint:
     """Tests for DELETE /v1/ddns/{provider}/{zone}/{type}/{record} endpoint."""
 
-    def test_delete_with_auth(self, client):
+    def test_delete_with_auth(self, client_auth_enabled):
         """Test DELETE endpoint with valid auth."""
-        response = client.delete(
+        response = client_auth_enabled.delete(
             "/v1/ddns/cloudflare/example.com/A/home",
             headers={"Authorization": "Bearer valid-token"},
         )
@@ -174,9 +170,9 @@ class TestDeleteEndpoint:
             st_status.HTTP_403_FORBIDDEN,
         ]
 
-    def test_delete_without_auth_returns_401(self, client):
+    def test_delete_without_auth_returns_401(self, client_auth_enabled):
         """Test DELETE endpoint without auth returns 401."""
-        response = client.delete("/v1/ddns/cloudflare/example.com/A/home")
+        response = client_auth_enabled.delete("/v1/ddns/cloudflare/example.com/A/home")
 
         assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
 
@@ -184,49 +180,41 @@ class TestDeleteEndpoint:
 class TestHealthEndpoint:
     """Tests for health check endpoint.
 
-    Since the /health route is dynamically registered based on config during
-    lifespan startup, each test needs to create a fresh FastAPI app instance
-    with the lifespan context manager to ensure the route is registered.
+    The /health route is dynamically registered based on config during
+    lifespan startup. Each test creates a fresh FastAPI app instance
+    with the appropriate configuration.
     """
 
-    def test_health_bypasses_auth(self, monkeypatch):
+    def test_health_bypasses_auth(self):
         """Test that health endpoint bypasses authentication."""
         # Create config with health enabled and auth enabled
         config = Config()
-        config.server = ServerConfig()
         config.health = HealthConfig(enabled=True)
         config.auth = AuthConfig(enabled=True, tokens=["valid-token"])
 
-        # Set the config before creating the app
-        monkeypatch.setattr("ddns_gateway.server._config", config)
-
-        # Create a fresh app with the lifespan that registers /health
-        test_app = FastAPI(lifespan=lifespan)
+        # Create a fresh app with this config
+        app = create_app(config)
 
         # Use context manager to ensure lifespan events are triggered
-        with TestClient(test_app) as test_client:
+        with TestClient(app) as test_client:
             # Health endpoint should be accessible without authentication
             response = test_client.get("/health")
 
             assert response.status_code == st_status.HTTP_200_OK
             assert response.json() == {"status": "ok"}
 
-    def test_health_disabled_returns_404(self, monkeypatch):
+    def test_health_disabled_returns_404(self):
         """Test that disabled health endpoint returns 404."""
         # Create config with health disabled
         config = Config()
-        config.server = ServerConfig()
         config.health = HealthConfig(enabled=False)
         config.auth = AuthConfig(enabled=False, tokens=[])
 
-        # Set the config before creating the app
-        monkeypatch.setattr("ddns_gateway.server._config", config)
-
-        # Create a fresh app with the lifespan that checks health.enabled
-        test_app = FastAPI(lifespan=lifespan)
+        # Create a fresh app with this config
+        app = create_app(config)
 
         # Use context manager to ensure lifespan events are triggered
-        with TestClient(test_app) as test_client:
+        with TestClient(app) as test_client:
             response = test_client.get("/health")
 
             assert response.status_code == st_status.HTTP_404_NOT_FOUND
@@ -348,3 +336,76 @@ class TestUpstreamAuthHeader:
         auth_id, auth_secret = parse_upstream_auth(header)
         assert auth_id == expected_id
         assert auth_secret == expected_secret
+
+
+class TestDebugInfo:
+    """Tests for debug information in responses."""
+
+    def test_debug_info_included_when_enabled(self, client_debug_enabled):
+        """Test that debug info is included when enabled."""
+        response = client_debug_enabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
+        )
+
+        data = response.json()
+        # Response should include debug field (may fail at provider level,
+        # but debug info should still be present)
+        assert "debug" in data
+        assert data["debug"] is not None
+        assert "raw_input" in data["debug"]
+        assert data["debug"]["raw_input"]["zone"] == "example.com"
+        assert data["debug"]["raw_input"]["record"] == "home"
+        assert data["debug"]["raw_input"]["type"] == "A"
+        assert data["debug"]["raw_input"]["value"] == "1.2.3.4"
+
+    def test_debug_info_not_included_when_disabled(self, client_auth_disabled):
+        """Test that debug info is not included when disabled."""
+        response = client_auth_disabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"value": "1.2.3.4"},
+        )
+
+        data = response.json()
+        # Response should not include debug field
+        assert "debug" not in data
+
+    def test_debug_info_shows_normalization(self, client_debug_enabled):
+        """Test that debug info shows normalized values."""
+        response = client_debug_enabled.put(
+            "/v1/ddns/cloudflare/EXAMPLE.COM/a/HOME",  # Mixed case
+            json={"value": "  1.2.3.4  "},  # With whitespace
+        )
+
+        data = response.json()
+        assert "debug" in data
+        assert data["debug"] is not None
+
+        # Raw input should preserve original values
+        raw = data["debug"]["raw_input"]
+        assert raw["zone"] == "EXAMPLE.COM"
+        assert raw["record"] == "HOME"
+        assert raw["type"] == "a"
+        assert raw["value"] == "  1.2.3.4  "
+
+        # Normalized should show cleaned values
+        if data["debug"]["normalized"] is not None:
+            norm = data["debug"]["normalized"]
+            assert norm["zone"] == "example.com"  # Lowercased
+            assert norm["record"] == "home"  # Lowercased
+            assert norm["type"] == "A"  # Uppercased
+            assert norm["value"] == "1.2.3.4"  # Stripped
+
+    def test_debug_info_on_validation_error(self, client_debug_enabled):
+        """Test that debug info is included even on validation errors."""
+        response = client_debug_enabled.put(
+            "/v1/ddns/cloudflare/example.com/INVALID/home",  # Invalid record type
+            json={"value": "1.2.3.4"},
+        )
+
+        data = response.json()
+        assert data["status"] == "error"
+        assert "debug" in data
+        assert data["debug"] is not None
+        assert "raw_input" in data["debug"]
+        # Normalized may be None for validation errors

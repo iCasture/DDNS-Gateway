@@ -3,10 +3,15 @@ FastAPI server for DDNS Gateway.
 
 This module provides the main API server with endpoints for DNS record operations.
 Supports PUT (upsert) and DELETE methods with authentication.
+
+Configuration is managed via the ``create_app(config)`` factory function.
+The config object is stored in ``app.state.config`` and accessible throughout
+the application lifecycle.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -19,7 +24,7 @@ from fastapi.responses import JSONResponse
 from starlette import status as st_status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
-from ddns_gateway.config import Config, load_config
+from ddns_gateway.config import Config
 from ddns_gateway.dedupe import DedupeCache
 from ddns_gateway.models import (
     ERROR_STATUS_MAP,
@@ -47,10 +52,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Global config (set during startup)
-_config: Config | None = None
-
-# Provider instances
+# Provider instances (stateless singletons, can be shared across requests)
 _providers: dict[DNSProvider, BaseDNSProvider] = {
     DNSProvider.CLOUDFLARE: CloudFlareProvider(),
     DNSProvider.ALIYUN: AliyunProvider(),
@@ -86,37 +88,14 @@ def _get_http_status_code(response: DDNSResponse) -> int:
     return 400
 
 
-def get_config() -> Config:
-    """Get the current configuration."""
-    if _config is None:
-        msg = "Configuration not loaded"
-        raise RuntimeError(msg)
-    return _config
-
-
-def set_preloaded_config(config: Config) -> None:
-    """
-    Inject a pre-loaded configuration into the server module.
-
-    This allows the CLI entry point to pass the parsed configuration to the
-    server instance, avoiding the need to re-parse command-line arguments
-    during application startup (e.g. in the lifespan handler).
-
-    Parameters
-    ----------
-    config : Config
-        The configuration object to set.
-    """
-    global _config  # noqa: PLW0603
-    _config = config
-
-
 class AuthMiddleware(BaseHTTPMiddleware):
     """
     Middleware for authentication.
 
-    Intercepts requests to /v1/ddns/ endpoints to check:
+    Intercepts requests to `/v1/ddns/` endpoints to check:
     1. Authentication via Authorization header -> 401 if missing, 403 if invalid
+
+    Configuration is accessed from ``request.app.state.config``.
     """
 
     async def dispatch(
@@ -129,11 +108,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not request.url.path.startswith("/v1/ddns/"):
             return await call_next(request)
 
-        # Config may not be loaded during startup
-        try:
-            config = get_config()
-        except RuntimeError:
-            return await call_next(request)
+        # Access config from app.state
+        config: Config = request.app.state.config
 
         # Skip auth check if disabled
         if not config.auth.enabled:
@@ -190,147 +166,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
 
         return await call_next(request)
-
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager."""
-    global _config  # noqa: PLW0603
-
-    # If config was not set by CLI (e.g., running via uvicorn directly),
-    # load it here
-    if _config is None:
-        _config = load_config()
-
-    # Initialize DedupeCache if enabled
-    if _config.dedupe.enabled:
-        _app.state.dedupe_cache = DedupeCache(
-            max_entries=_config.dedupe.max_entries,
-            window_seconds=_config.dedupe.window_seconds,
-        )
-        logger.info(
-            "[lifespan] DedupeCache initialized (max=%d, window=%ds)",
-            _config.dedupe.max_entries,
-            _config.dedupe.window_seconds,
-        )
-    else:
-        _app.state.dedupe_cache = None
-        logger.info("[lifespan] DedupeCache disabled")
-
-    # Store retry config values in app.state for service layer access
-    _app.state.request_timeout_sec = _config.retry.request_timeout_sec
-    # Store dedupe config for singleflight
-    _app.state.dedupe_config = _config.dedupe if _config.dedupe.enabled else None
-
-    # Dynamically register "/health" endpoint (GET method) if enabled
-    if _config.health.enabled:
-        _app.add_api_route("/health", health, methods=["GET"])
-
-    logger.info(
-        'DDNS Gateway starting on "%s:%d".',
-        _config.server.host,
-        _config.server.port,
-    )
-
-    yield
-
-    logger.info("DDNS Gateway shutting down.")
-
-
-app = FastAPI(
-    title="DDNS Gateway",
-    description="DDNS update service for RouterOS - bridges ROS scripts with DNS providers",
-    version="0.2.0",
-    lifespan=lifespan,
-)
-
-# Add middleware for authentication
-app.add_middleware(AuthMiddleware)
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> Response:
-    """
-    Handle HTTP exceptions with consistent JSON responses.
-
-    Convert FastAPI's default {"detail": "..."} format to the unified
-    API response format.
-    """
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=DDNSResponse(
-            status="error",
-            action=None,
-            upstream_called=False,
-            provider="unknown",
-            record=RecordInfo(zone="", type="", name=""),
-            result=None,
-            warnings=[],
-            errors=[
-                ErrorModel(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message=str(exc.detail),
-                ),
-            ],
-            meta=ResponseMeta(),
-            debug=None,
-        ).model_dump(exclude_none=True),
-    )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    _request: Request,
-    exc: RequestValidationError,
-) -> Response:
-    """
-    Handle validation errors with consistent JSON responses.
-
-    Convert FastAPI's validation error format to the unified API response format,
-    listing all missing or invalid fields in the message.
-    """
-    errors = exc.errors()
-    missing_fields: list[str] = []
-    invalid_fields: list[str] = []
-
-    for error in errors:
-        field_path = ".".join(
-            str(loc) for loc in error["loc"] if loc not in {"query", "body"}
-        )
-        if error["type"] == "missing":
-            missing_fields.append(field_path)
-        else:
-            invalid_fields.append(f"{field_path}: {error['msg']}")
-
-    # Build message
-    messages: list[str] = []
-    if missing_fields:
-        messages.append(f"Missing required fields: {', '.join(missing_fields)}")
-    if invalid_fields:
-        messages.append(f"Invalid fields: {'; '.join(invalid_fields)}")
-
-    message = ". ".join(messages) if messages else "Validation error"
-
-    return JSONResponse(
-        status_code=st_status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content=DDNSResponse(
-            status="error",
-            action=None,
-            upstream_called=False,
-            provider="unknown",
-            record=RecordInfo(zone="", type="", name=""),
-            result=None,
-            warnings=[],
-            errors=[
-                ErrorModel(
-                    code=ErrorCode.VALIDATION_ERROR,
-                    message=message,
-                ),
-            ],
-            meta=ResponseMeta(),
-            debug=None,
-        ).model_dump(exclude_none=True),
-    )
 
 
 # =============================================================================
@@ -490,11 +325,226 @@ def extract_credentials_from_header(
 
 
 # =============================================================================
+# App Factory
+# =============================================================================
+
+
+def create_app(config: Config) -> FastAPI:
+    """
+    Create and configure the FastAPI application.
+
+    This factory function creates a new FastAPI instance with the provided
+    configuration. The config is stored in ``app.state.config`` and accessible
+    throughout the application.
+
+    Parameters
+    ----------
+    config : Config
+        The application configuration object.
+
+    Returns
+    -------
+    FastAPI
+        The configured FastAPI application instance.
+
+    Examples
+    --------
+    >>> from ddns_gateway.config import load_config
+    >>> config = load_config()
+    >>> app = create_app(config)
+    >>> # Run with uvicorn
+    >>> import uvicorn
+    >>> uvicorn.run(app, host=config.server.host, port=config.server.port)
+    """
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        """
+        Application lifespan manager.
+
+        Initializes app.state with config and dedupe cache.
+        The config object is captured from the enclosing create_app scope.
+        """
+        # Store the config in app.state for access throughout the app
+        app.state.config = config
+
+        # Initialize DedupeCache if enabled
+        if config.dedupe.enabled:
+            app.state.dedupe_cache = DedupeCache(
+                max_entries=config.dedupe.max_entries,
+                window_seconds=config.dedupe.window_seconds,
+            )
+            logger.info(
+                "[lifespan] DedupeCache initialized (max=%d, window=%ds)",
+                config.dedupe.max_entries,
+                config.dedupe.window_seconds,
+            )
+        else:
+            app.state.dedupe_cache = None
+            logger.info("[lifespan] DedupeCache disabled")
+
+        # Dynamically register "/health" endpoint (GET method) if enabled
+        if config.health.enabled:
+            app.add_api_route("/health", health, methods=["GET"])
+
+        logger.info(
+            'DDNS Gateway starting on "%s:%d".',
+            config.server.host,
+            config.server.port,
+        )
+
+        yield
+
+        logger.info("DDNS Gateway shutting down.")
+
+    # Create FastAPI app
+    app = FastAPI(
+        title="DDNS Gateway",
+        description="DDNS update service for RouterOS - bridges ROS scripts with DNS providers",
+        version="0.2.0",
+        lifespan=lifespan,
+    )
+
+    # Add middleware for authentication
+    app.add_middleware(AuthMiddleware)
+
+    # Register exception handlers
+    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+
+    # Register API routes
+    app.add_api_route(
+        "/v1/ddns/{provider}/{zone}/{record_type}/{record}",
+        upsert_ddns_record,
+        methods=["PUT"],
+    )
+    app.add_api_route(
+        "/v1/ddns/{provider}/{zone}/{record_type}/{record}",
+        delete_ddns_record,
+        methods=["DELETE"],
+    )
+
+    return app
+
+
+# =============================================================================
+# Exception Handlers
+# =============================================================================
+
+
+async def http_exception_handler(_request: Request, exc: Exception) -> Response:
+    """
+    Handle HTTP exceptions with consistent JSON responses.
+
+    Convert FastAPI's default {"detail": "..."} format to the unified
+    API response format.
+    """
+    # Type narrowing for the actual exception type
+    http_exc = exc if isinstance(exc, HTTPException) else HTTPException(500, str(exc))
+    return JSONResponse(
+        status_code=http_exc.status_code,
+        content=DDNSResponse(
+            status="error",
+            action=None,
+            upstream_called=False,
+            provider="unknown",
+            record=RecordInfo(zone="", type="", name=""),
+            result=None,
+            warnings=[],
+            errors=[
+                ErrorModel(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=str(http_exc.detail),
+                ),
+            ],
+            meta=ResponseMeta(),
+            debug=None,
+        ).model_dump(exclude_none=True),
+    )
+
+
+async def validation_exception_handler(
+    _request: Request,
+    exc: Exception,
+) -> Response:
+    """
+    Handle validation errors with consistent JSON responses.
+
+    Convert FastAPI's validation error format to the unified API response format,
+    listing all missing or invalid fields in the message.
+    """
+    # Type narrowing for the actual exception type
+    if not isinstance(exc, RequestValidationError):
+        return JSONResponse(
+            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=DDNSResponse(
+                status="error",
+                action=None,
+                upstream_called=False,
+                provider="unknown",
+                record=RecordInfo(zone="", type="", name=""),
+                result=None,
+                warnings=[],
+                errors=[
+                    ErrorModel(
+                        code=ErrorCode.INTERNAL_ERROR,
+                        message=str(exc),
+                    ),
+                ],
+                meta=ResponseMeta(),
+                debug=None,
+            ).model_dump(exclude_none=True),
+        )
+
+    errors = exc.errors()
+    missing_fields: list[str] = []
+    invalid_fields: list[str] = []
+
+    for error in errors:
+        field_path = ".".join(
+            str(loc) for loc in error["loc"] if loc not in {"query", "body"}
+        )
+        if error["type"] == "missing":
+            missing_fields.append(field_path)
+        else:
+            invalid_fields.append(f"{field_path}: {error['msg']}")
+
+    # Build message
+    messages: list[str] = []
+    if missing_fields:
+        messages.append(f"Missing required fields: {', '.join(missing_fields)}")
+    if invalid_fields:
+        messages.append(f"Invalid fields: {'; '.join(invalid_fields)}")
+
+    message = ". ".join(messages) if messages else "Validation error"
+
+    return JSONResponse(
+        status_code=st_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content=DDNSResponse(
+            status="error",
+            action=None,
+            upstream_called=False,
+            provider="unknown",
+            record=RecordInfo(zone="", type="", name=""),
+            result=None,
+            warnings=[],
+            errors=[
+                ErrorModel(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=message,
+                ),
+            ],
+            meta=ResponseMeta(),
+            debug=None,
+        ).model_dump(exclude_none=True),
+    )
+
+
+# =============================================================================
 # API Endpoints
 # =============================================================================
 
 
-@app.put("/v1/ddns/{provider}/{zone}/{record_type}/{record}")
 async def upsert_ddns_record(
     provider: str,
     zone: str,
@@ -542,6 +592,9 @@ async def upsert_ddns_record(
     DDNSResponse
         The operation result.
     """
+    # Access config from app.state
+    config: Config = request.app.state.config
+
     provider_lower = provider.lower()
 
     # Validate provider
@@ -677,7 +730,7 @@ async def upsert_ddns_record(
         final_value,
     )
 
-    # Call service layer
+    # Call service layer with config values
     response = await upsert_record_service(
         provider_instance=provider_instance,
         provider=provider_lower,
@@ -690,8 +743,9 @@ async def upsert_ddns_record(
         proxied=final_proxied,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
-        dedupe_config=request.app.state.dedupe_config,
-        timeout_sec=request.app.state.request_timeout_sec,
+        dedupe_config=config.dedupe if config.dedupe.enabled else None,
+        timeout_sec=config.retry.request_timeout_sec,
+        include_debug_info=config.response.include_debug_info,
     )
 
     # Merge API-layer warnings into response
@@ -705,11 +759,8 @@ async def upsert_ddns_record(
     headers: dict[str, str] = {}
 
     # Add Retry-After header for singleflight timeout (504)
-    if (
-        status_code == st_status.HTTP_504_GATEWAY_TIMEOUT
-        and request.app.state.dedupe_config
-    ):
-        retry_after = math.ceil(request.app.state.dedupe_config.singleflight_lease_sec)
+    if status_code == st_status.HTTP_504_GATEWAY_TIMEOUT and config.dedupe.enabled:
+        retry_after = math.ceil(config.dedupe.singleflight_lease_sec)
         headers["Retry-After"] = str(retry_after)
 
     logger.info(
@@ -726,7 +777,6 @@ async def upsert_ddns_record(
     )
 
 
-@app.delete("/v1/ddns/{provider}/{zone}/{record_type}/{record}")
 async def delete_ddns_record(
     provider: str,
     zone: str,
@@ -754,6 +804,9 @@ async def delete_ddns_record(
     DDNSResponse
         The operation result.
     """
+    # Access config from app.state
+    config: Config = request.app.state.config
+
     provider_lower = provider.lower()
 
     # Validate provider
@@ -812,6 +865,76 @@ async def delete_ddns_record(
     # Extract credentials
     credentials = extract_credentials_from_header(provider_enum, request)
 
+    # Check for ignored body/query parameters and generate warnings
+    api_warnings: list[WarningModel] = []
+
+    # Check for body (DELETE should not accept body)
+    # Since DELETE doesn't use body, it's safe to read it to check if it exists
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("application/json"):
+        # Try to read body to check if it's non-empty
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                # Try to parse as JSON to get ignored keys for details
+                try:
+                    body_data = json.loads(body_bytes.decode())
+                    if body_data:
+                        ignored_keys = (
+                            list(body_data.keys())
+                            if isinstance(body_data, dict)
+                            else []
+                        )
+                        api_warnings.append(
+                            WarningModel(
+                                code=WarningCode.DELETE_IGNORES_BODY_PARAMS,
+                                message="DELETE request ignores body parameters. Only path parameters are used.",
+                                field="body",
+                                details={"ignored_keys": ignored_keys}
+                                if ignored_keys
+                                else None,
+                            ),
+                        )
+                    else:
+                        # Empty dict/list, still warn
+                        api_warnings.append(
+                            WarningModel(
+                                code=WarningCode.DELETE_IGNORES_BODY_PARAMS,
+                                message="DELETE request ignores body parameters. Only path parameters are used.",
+                                field="body",
+                            ),
+                        )
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # If body is not valid JSON, still warn about non-empty body
+                    api_warnings.append(
+                        WarningModel(
+                            code=WarningCode.DELETE_IGNORES_BODY_PARAMS,
+                            message="DELETE request ignores body parameters. Only path parameters are used.",
+                            field="body",
+                        ),
+                    )
+        except Exception:  # noqa: S110, BLE001
+            # If reading body fails, skip warning (shouldn't happen in normal flow)
+            pass
+
+    # Check for query parameters (DELETE should not use query)
+    query_params = dict(request.query_params)
+    # Filter out non-business query params (e.g., format=plain for response format)
+    business_query_params = {
+        k: v
+        for k, v in query_params.items()
+        if k not in {"format"}  # format is allowed for response format negotiation
+    }
+    if business_query_params:
+        api_warnings.append(
+            WarningModel(
+                code=WarningCode.DELETE_IGNORES_QUERY_PARAMS,
+                message="DELETE request ignores query parameters. Only path parameters are used.",
+                field="query",
+                details={"ignored_params": list(business_query_params.keys())},
+            ),
+        )
+
     # Log request
     logger.info(
         "[request] DELETE /v1/ddns/%s/%s/%s/%s",
@@ -821,7 +944,7 @@ async def delete_ddns_record(
         record,
     )
 
-    # Call service layer
+    # Call service layer with config values
     response = await delete_record_service(
         provider_instance=provider_instance,
         provider=provider_lower,
@@ -830,9 +953,14 @@ async def delete_ddns_record(
         record=record,
         credentials=credentials,
         dedupe_cache=request.app.state.dedupe_cache,
-        dedupe_config=request.app.state.dedupe_config,
-        timeout_sec=request.app.state.request_timeout_sec,
+        dedupe_config=config.dedupe if config.dedupe.enabled else None,
+        timeout_sec=config.retry.request_timeout_sec,
+        include_debug_info=config.response.include_debug_info,
     )
+
+    # Merge API-layer warnings into response
+    if api_warnings:
+        response.warnings = api_warnings + response.warnings
 
     # Determine HTTP status code using error code mapping
     status_code = _get_http_status_code(response)
@@ -841,11 +969,8 @@ async def delete_ddns_record(
     headers: dict[str, str] = {}
 
     # Add Retry-After header for singleflight timeout (504)
-    if (
-        status_code == st_status.HTTP_504_GATEWAY_TIMEOUT
-        and request.app.state.dedupe_config
-    ):
-        retry_after = math.ceil(request.app.state.dedupe_config.singleflight_lease_sec)
+    if status_code == st_status.HTTP_504_GATEWAY_TIMEOUT and config.dedupe.enabled:
+        retry_after = math.ceil(config.dedupe.singleflight_lease_sec)
         headers["Retry-After"] = str(retry_after)
 
     logger.info(
@@ -862,8 +987,11 @@ async def delete_ddns_record(
     )
 
 
-# Note: Unlike the routes above, this endpoint is dynamically registered
-# in lifespan() based on config.health.enabled.
 async def health() -> Response:
-    """Health check endpoint."""
+    """
+    Health check endpoint.
+
+    This endpoint is dynamically registered in lifespan() based on
+    config.health.enabled.
+    """
     return JSONResponse(content={"status": "ok"})
