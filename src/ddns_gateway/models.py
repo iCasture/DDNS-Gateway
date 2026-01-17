@@ -79,8 +79,8 @@ class WarningCode(StrEnum):
     ----------
     ALI_COMMENT_UPDATE_FAILED : str
         Aliyun provider failed to update record comment in second API call.
-    CF_PROXIED_IGNORED_FOR_TXT : str
-        Cloudflare proxied parameter ignored for TXT record type.
+    PROXIED_IGNORED : str
+        Cloudflare proxied parameter ignored for non-A/AAAA/CNAME record type.
     PROXIED_IGNORED_FOR_NON_CF : str
         Proxied parameter ignored for non-Cloudflare provider.
     QUERY_IGNORED_DUE_TO_BODY : str
@@ -98,7 +98,7 @@ class WarningCode(StrEnum):
     """
 
     ALI_COMMENT_UPDATE_FAILED = "ALI_COMMENT_UPDATE_FAILED"
-    CF_PROXIED_IGNORED_FOR_TXT = "CF_PROXIED_IGNORED_FOR_TXT"
+    PROXIED_IGNORED = "PROXIED_IGNORED"
     PROXIED_IGNORED_FOR_NON_CF = "PROXIED_IGNORED_FOR_NON_CF"
     QUERY_IGNORED_DUE_TO_BODY = "QUERY_IGNORED_DUE_TO_BODY"
     DELETE_IGNORES_BODY_PARAMS = "DELETE_IGNORES_BODY_PARAMS"

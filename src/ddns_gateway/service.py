@@ -27,6 +27,7 @@ from ddns_gateway.models import (
     DDNSResponse,
     DebugInfo,
     DedupeInfo,
+    DNSProvider,
     EffectiveValues,
     ErrorCode,
     ErrorModel,
@@ -35,6 +36,7 @@ from ddns_gateway.models import (
     ResponseMeta,
     ResultInfo,
     UpstreamInfo,
+    WarningCode,
     WarningModel,
 )
 from ddns_gateway.normalize import (
@@ -258,6 +260,7 @@ def _build_deduped_response(
     resp_dict: dict[str, Any],
     window_seconds: int,
     *,
+    extra_warnings: list[WarningModel] | None = None,
     include_debug_info: bool = False,
     raw_input: dict[str, Any] | None = None,
     normalized: dict[str, Any] | None = None,
@@ -271,6 +274,8 @@ def _build_deduped_response(
         The response dictionary from ``build_deduped_response``.
     window_seconds : int
         The dedupe window used for meta.dedupe.window_sec.
+    extra_warnings : list[WarningModel] | None
+        Additional warnings to append (e.g., 'proxied' validation warnings).
     include_debug_info : bool
         Whether to include debug information in the response.
     raw_input : dict[str, Any] | None
@@ -312,6 +317,9 @@ def _build_deduped_response(
                 if hasattr(w, "__dict__")
                 else WarningModel(code=str(w), message=str(w)),
             )
+
+    if extra_warnings:
+        warnings_list.extend(extra_warnings)
 
     return DDNSResponse(
         status=resp_dict["status"],
@@ -464,6 +472,34 @@ async def upsert_record_service(
             normalized=None,
         )
 
+    # Validate 'proxied': only effective for Cloudflare A/AAAA/CNAME records.
+    # For other cases, set to None and emit a warning.
+    proxied_validated = proxied
+    if proxied is not None:
+        if provider != DNSProvider.CLOUDFLARE:
+            warnings.append(
+                WarningModel(
+                    code=WarningCode.PROXIED_IGNORED_FOR_NON_CF,
+                    message="Proxied parameter ignored for non-Cloudflare provider",
+                    field="proxied",
+                    details={"provider": provider},
+                ),
+            )
+            proxied_validated = None
+        elif record_type_enum not in {RecordType.A, RecordType.AAAA, RecordType.CNAME}:
+            warnings.append(
+                WarningModel(
+                    code=WarningCode.PROXIED_IGNORED,
+                    message=(
+                        "The 'proxied' parameter is only supported for A/AAAA/CNAME records "
+                        "and is ignored for the current record type."
+                    ),
+                    field="proxied",
+                    details={"record_type": record_type_enum.value},
+                ),
+            )
+            proxied_validated = None
+
     # Build normalized for debug (after successful normalization)
     normalized = _build_debug_dict(
         zone=norm_zone,
@@ -472,7 +508,7 @@ async def upsert_record_service(
         value=norm_value,
         ttl=norm_ttl,
         comment=norm_comment,
-        proxied=proxied,
+        proxied=proxied_validated,
     )
 
     # -------------------------------------------------------------------------
@@ -489,7 +525,7 @@ async def upsert_record_service(
             value=norm_value,
             ttl=norm_ttl,
             comment=norm_comment,
-            proxied=proxied,
+            proxied=proxied_validated,
         )
 
         cached = await dedupe_cache.get(dedupe_key)
@@ -503,6 +539,7 @@ async def upsert_record_service(
             return _build_deduped_response(
                 resp_dict,
                 dedupe_cache.window_seconds,
+                extra_warnings=warnings,
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
@@ -538,6 +575,7 @@ async def upsert_record_service(
                 return _build_deduped_response(
                     resp_dict,
                     dedupe_cache.window_seconds,
+                    extra_warnings=warnings,
                     include_debug_info=include_debug_info,
                     raw_input=raw_input,
                     normalized=normalized,
@@ -557,6 +595,7 @@ async def upsert_record_service(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
                 ),
+                warnings=warnings,
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
@@ -590,6 +629,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -600,7 +640,7 @@ async def upsert_record_service(
         value=norm_value,
         ttl=norm_ttl,
         comment=norm_comment,
-        proxied=proxied,
+        proxied=proxied_validated,
     )
 
     # -------------------------------------------------------------------------
@@ -633,6 +673,7 @@ async def upsert_record_service(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=f"Failed to create record: {e}",
                 ),
+                warnings=warnings,
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
@@ -651,7 +692,7 @@ async def upsert_record_service(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=result.message,
                 ),
-                warnings=result.warnings,
+                warnings=warnings + (result.warnings or []),
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
@@ -673,12 +714,13 @@ async def upsert_record_service(
                     value=norm_value,
                     ttl=norm_ttl,
                     comment=norm_comment,
-                    proxied=proxied,
+                    proxied=proxied_validated,
                     previous_value=None,
-                    warnings=result.warnings or [],
+                    warnings=warnings + (result.warnings or []),
                 ),
             )
 
+        combined_warnings = warnings + (result.warnings or [])
         return _build_success_response(
             provider=provider,
             zone=norm_zone,
@@ -690,7 +732,7 @@ async def upsert_record_service(
                 value=norm_value,
                 ttl=norm_ttl,
                 comment=norm_comment,
-                proxied=proxied,
+                proxied=proxied_validated,
             ),
             upstream=UpstreamInfo(
                 record_id=result.record_id,
@@ -698,7 +740,7 @@ async def upsert_record_service(
                 raw_status=result.raw_status,
                 http_status=result.http_status,
             ),
-            warnings=result.warnings,
+            warnings=combined_warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -714,7 +756,9 @@ async def upsert_record_service(
     value_changed = existing_value != norm_value
     ttl_changed = norm_ttl is not None and existing.ttl != norm_ttl
     comment_changed = not comments_equal(existing.comment, norm_comment)
-    proxied_changed = proxied is not None and existing.proxied != proxied
+    proxied_changed = (
+        proxied_validated is not None and existing.proxied != proxied_validated
+    )
 
     if not (value_changed or ttl_changed or comment_changed or proxied_changed):
         # No change needed - still cache this result
@@ -735,7 +779,7 @@ async def upsert_record_service(
                     comment=existing.comment,
                     proxied=existing.proxied,
                     previous_value=None,
-                    warnings=[],
+                    warnings=warnings,
                 ),
             )
 
@@ -756,6 +800,7 @@ async def upsert_record_service(
                 record_id=existing.record_id,
                 zone_id=existing.zone_id,
             ),
+            warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -787,6 +832,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to update record: {e}",
             ),
+            warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -805,7 +851,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=result.message,
             ),
-            warnings=result.warnings,
+            warnings=warnings + (result.warnings or []),
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -814,7 +860,9 @@ async def upsert_record_service(
     # Compute effective values for cache
     eff_ttl = norm_ttl if norm_ttl is not None else existing.ttl
     eff_comment = norm_comment if norm_comment is not None else existing.comment
-    eff_proxied = proxied if proxied is not None else existing.proxied
+    eff_proxied = (
+        proxied_validated if proxied_validated is not None else existing.proxied
+    )
     eff_record_id = result.record_id or existing.record_id
     eff_zone_id = result.zone_id or existing.zone_id
 
@@ -836,10 +884,11 @@ async def upsert_record_service(
                 comment=eff_comment,
                 proxied=eff_proxied,
                 previous_value=existing_value if value_changed else None,
-                warnings=result.warnings or [],
+                warnings=warnings + (result.warnings or []),
             ),
         )
 
+    combined_warnings = warnings + (result.warnings or [])
     return _build_success_response(
         provider=provider,
         zone=norm_zone,
@@ -860,7 +909,7 @@ async def upsert_record_service(
             http_status=result.http_status,
         ),
         previous_value=existing_value if value_changed else None,
-        warnings=result.warnings,
+        warnings=combined_warnings,
         include_debug_info=include_debug_info,
         raw_input=raw_input,
         normalized=normalized,
@@ -922,6 +971,7 @@ async def delete_record_service(
     DDNSResponse
         The operation response.
     """
+    warnings: list[WarningModel] = []
     # Build raw input for debug (before normalization)
     raw_input = _build_debug_dict(
         zone=zone,
@@ -1101,6 +1151,33 @@ async def delete_record_service(
     # Step 5: Return nochange if not found
     # -------------------------------------------------------------------------
     if existing is None:
+        warnings.append(
+            WarningModel(
+                code=WarningCode.RECORD_NOT_FOUND,
+                message="Record not found, nothing to delete",
+                field="record",
+            ),
+        )
+        if dedupe_cache is not None and dedupe_key is not None:
+            await dedupe_cache.set(
+                dedupe_key,
+                create_cached_base(
+                    status="success",
+                    action="unchanged",
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    record_id=None,
+                    zone_id=None,
+                    value="",
+                    ttl=None,
+                    comment=None,
+                    proxied=None,
+                    previous_value=None,
+                    warnings=warnings,
+                ),
+            )
         return _build_success_response(
             provider=provider,
             zone=norm_zone,
@@ -1108,6 +1185,7 @@ async def delete_record_service(
             record=norm_record,
             action="unchanged",
             upstream_called=False,
+            warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,

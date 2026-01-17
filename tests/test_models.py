@@ -159,7 +159,7 @@ class TestWarningCode:
 
     def test_warning_code_values(self):
         assert WarningCode.ALI_COMMENT_UPDATE_FAILED == "ALI_COMMENT_UPDATE_FAILED"
-        assert WarningCode.CF_PROXIED_IGNORED_FOR_TXT == "CF_PROXIED_IGNORED_FOR_TXT"
+        assert WarningCode.PROXIED_IGNORED == "PROXIED_IGNORED"
         assert WarningCode.DEDUPE_HIT_SHORTCIRCUIT == "DEDUPE_HIT_SHORTCIRCUIT"
 
     def test_warning_code_from_string(self):

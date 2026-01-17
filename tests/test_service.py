@@ -244,6 +244,11 @@ class TestUpsertService:
         mock_credentials,
     ):
         """Test that warnings from provider are propagated to response."""
+        # Note: For TXT records with proxied=True, service layer converts it to
+        # proxied_validated=None and generates a warning. Provider receives None,
+        # so it won't generate the same warning. We use A record here to test
+        # that provider warnings are correctly propagated without service layer
+        # generating a duplicate warning.
         mock_provider.find_record = AsyncMock(return_value=None)
         mock_provider.create_record = AsyncMock(
             return_value=UpstreamResult(
@@ -253,10 +258,45 @@ class TestUpsertService:
                 record_id="rec_123",
                 warnings=[
                     WarningModel(
-                        code=WarningCode.CF_PROXIED_IGNORED_FOR_TXT,
-                        message="Proxied ignored for TXT",
+                        code=WarningCode.PROXIED_IGNORED,
+                        message="Test warning from provider",
                     ),
                 ],
+            ),
+        )
+
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=True,
+            credentials=mock_credentials,
+        )
+
+        assert response.status == "success"
+        assert len(response.warnings) == 1
+        assert response.warnings[0].code == WarningCode.PROXIED_IGNORED
+        assert response.warnings[0].message == "Test warning from provider"
+
+    @pytest.mark.asyncio
+    async def test_proxied_warning_for_txt_record(
+        self,
+        mock_provider,
+        mock_credentials,
+    ):
+        """Test that proxied=True for TXT record generates warning."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
             ),
         )
 
@@ -275,7 +315,81 @@ class TestUpsertService:
 
         assert response.status == "success"
         assert len(response.warnings) == 1
-        assert response.warnings[0].code == WarningCode.CF_PROXIED_IGNORED_FOR_TXT
+        assert response.warnings[0].code == WarningCode.PROXIED_IGNORED
+        assert "proxied" in response.warnings[0].message.lower()
+        assert "A/AAAA/CNAME" in response.warnings[0].message
+        assert response.result.effective.proxied is None
+
+    @pytest.mark.asyncio
+    async def test_proxied_warning_for_non_cloudflare_provider(
+        self,
+        mock_provider,
+        mock_credentials,
+    ):
+        """Test that proxied=True for non-Cloudflare provider generates warning."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="aliyun",  # Non-Cloudflare provider
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=True,
+            credentials=mock_credentials,
+        )
+
+        assert response.status == "success"
+        assert len(response.warnings) == 1
+        assert response.warnings[0].code == WarningCode.PROXIED_IGNORED_FOR_NON_CF
+        assert "non-cloudflare" in response.warnings[0].message.lower()
+        assert response.result.effective.proxied is None
+
+    @pytest.mark.asyncio
+    async def test_proxied_no_warning_for_valid_record_type(
+        self,
+        mock_provider,
+        mock_credentials,
+    ):
+        """Test that proxied=True for A/AAAA/CNAME records doesn't generate warning."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        # Test with A record
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=True,
+            credentials=mock_credentials,
+        )
+
+        assert response.status == "success"
+        assert len(response.warnings) == 0
+        assert response.result.effective.proxied is True
 
 
 # =============================================================================
