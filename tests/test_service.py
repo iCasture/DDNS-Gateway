@@ -165,7 +165,9 @@ class TestUpsertService:
 
     @pytest.mark.asyncio
     async def test_invalid_record_type_returns_error(
-        self, mock_provider, mock_credentials,
+        self,
+        mock_provider,
+        mock_credentials,
     ):
         """Test that invalid record type returns error."""
         response = await upsert_record_service(
@@ -237,7 +239,9 @@ class TestUpsertService:
 
     @pytest.mark.asyncio
     async def test_warnings_propagated_from_provider(
-        self, mock_provider, mock_credentials,
+        self,
+        mock_provider,
+        mock_credentials,
     ):
         """Test that warnings from provider are propagated to response."""
         mock_provider.find_record = AsyncMock(return_value=None)
@@ -392,3 +396,163 @@ class TestDeleteService:
 
         assert response.status == "error"
         assert response.errors[0].code == ErrorCode.INVALID_RECORD_TYPE
+
+
+# =============================================================================
+# Debug Info Tests
+# =============================================================================
+
+
+class TestDebugInfo:
+    """Tests for debug information in service responses."""
+
+    @pytest.mark.asyncio
+    async def test_upsert_debug_info_enabled(self, mock_provider, mock_credentials):
+        """Test that debug info is included when enabled for upsert."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="EXAMPLE.COM",  # Mixed case
+            record_type="a",  # Lowercase
+            record="HOME",  # Uppercase
+            value="  1.2.3.4  ",  # With whitespace
+            ttl=300,
+            comment="  test comment  ",  # With whitespace
+            proxied=True,
+            credentials=mock_credentials,
+            include_debug_info=True,
+        )
+
+        assert response.status == "success"
+        assert response.debug is not None
+
+        # Check raw input
+        assert response.debug.raw_input is not None
+        assert response.debug.raw_input["zone"] == "EXAMPLE.COM"
+        assert response.debug.raw_input["record"] == "HOME"
+        assert response.debug.raw_input["type"] == "a"
+        assert response.debug.raw_input["value"] == "  1.2.3.4  "
+        assert response.debug.raw_input["ttl"] == 300
+        assert response.debug.raw_input["comment"] == "  test comment  "
+        assert response.debug.raw_input["proxied"] is True
+
+        # Check normalized
+        assert response.debug.normalized is not None
+        assert response.debug.normalized["zone"] == "example.com"
+        assert response.debug.normalized["record"] == "home"
+        assert response.debug.normalized["type"] == "A"
+        assert response.debug.normalized["value"] == "1.2.3.4"
+        assert response.debug.normalized["ttl"] == 300
+        assert response.debug.normalized["comment"] == "test comment"
+        assert response.debug.normalized["proxied"] is True
+
+    @pytest.mark.asyncio
+    async def test_upsert_debug_info_disabled(self, mock_provider, mock_credentials):
+        """Test that debug info is not included when disabled for upsert."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=None,
+            credentials=mock_credentials,
+            include_debug_info=False,  # Disabled
+        )
+
+        assert response.status == "success"
+        assert response.debug is None
+
+    @pytest.mark.asyncio
+    async def test_upsert_debug_info_on_error(self, mock_provider, mock_credentials):
+        """Test that debug info is included on validation error."""
+        response = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="INVALID",  # Invalid type
+            record="home",
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=None,
+            credentials=mock_credentials,
+            include_debug_info=True,
+        )
+
+        assert response.status == "error"
+        assert response.debug is not None
+        assert response.debug.raw_input is not None
+        # Normalized may be None for validation errors
+        assert response.debug.raw_input["type"] == "INVALID"
+
+    @pytest.mark.asyncio
+    async def test_delete_debug_info_enabled(self, mock_provider, mock_credentials):
+        """Test that debug info is included when enabled for delete."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+
+        response = await delete_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="EXAMPLE.COM",  # Mixed case
+            record_type="a",  # Lowercase
+            record="HOME",  # Uppercase
+            credentials=mock_credentials,
+            include_debug_info=True,
+        )
+
+        assert response.status == "success"
+        assert response.debug is not None
+
+        # Check raw input
+        assert response.debug.raw_input is not None
+        assert response.debug.raw_input["zone"] == "EXAMPLE.COM"
+        assert response.debug.raw_input["record"] == "HOME"
+        assert response.debug.raw_input["type"] == "a"
+
+        # Check normalized
+        assert response.debug.normalized is not None
+        assert response.debug.normalized["zone"] == "example.com"
+        assert response.debug.normalized["record"] == "home"
+        assert response.debug.normalized["type"] == "A"
+
+    @pytest.mark.asyncio
+    async def test_delete_debug_info_disabled(self, mock_provider, mock_credentials):
+        """Test that debug info is not included when disabled for delete."""
+        mock_provider.find_record = AsyncMock(return_value=None)
+
+        response = await delete_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            credentials=mock_credentials,
+            include_debug_info=False,  # Disabled
+        )
+
+        assert response.status == "success"
+        assert response.debug is None

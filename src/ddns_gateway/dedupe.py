@@ -766,6 +766,45 @@ def build_deduped_response(
         "name": base.record,
     }
 
+    # Add DEDUPE_HIT_SHORTCIRCUIT warning to indicate cache hit
+    # This allows RouterOS scripts to distinguish between "no upstream call"
+    # (deduped) and "upstream called but no change" (nochange).
+    # Both the action field (action="deduped" vs action="nochange") and this
+    # warning code can be used for machine-readable detection.
+    # Convert all warnings to dict format for consistency
+    warnings_list: list[dict] = []
+    for w in base.warnings:
+        if isinstance(w, dict):
+            warnings_list.append(w)
+        # Convert WarningModel (Pydantic) to dict
+        # Try model_dump() first (Pydantic v2), then dict() (Pydantic v1)
+        elif hasattr(w, "model_dump"):
+            warnings_list.append(w.model_dump(exclude_none=True))
+        elif hasattr(w, "dict"):
+            warnings_list.append(w.dict(exclude_none=True))
+        else:
+            # Fallback: construct from attributes
+            warnings_list.append(
+                {
+                    "code": getattr(w, "code", str(w)),
+                    "message": getattr(w, "message", str(w)),
+                    "field": getattr(w, "field", None),
+                    "details": getattr(w, "details", None),
+                },
+            )
+
+    # Add the dedupe hit warning
+    warnings_list.append(
+        {
+            "code": "DEDUPE_HIT_SHORTCIRCUIT",
+            "message": "Request was short-circuited due to deduplication cache hit. No upstream API call was made.",
+            "field": "dedupe",
+            "details": {
+                "window_sec": window_seconds,
+            },
+        },
+    )
+
     return {
         "status": base.status,
         "action": "deduped",  # Override: NOT original_action
@@ -773,7 +812,7 @@ def build_deduped_response(
         "provider": base.provider,
         "record": record_info,
         "result": result_info,
-        "warnings": list(base.warnings),  # Convert tuple to list (new object)
+        "warnings": warnings_list,
         "errors": [],
         "meta": fresh_meta,
         "debug": None,

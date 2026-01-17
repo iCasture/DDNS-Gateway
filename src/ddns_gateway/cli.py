@@ -2,6 +2,8 @@
 CLI entry point for DDNS Gateway.
 
 This module provides the command-line interface for starting the server.
+It parses arguments, loads configuration, creates the app via the factory
+function, and runs it with uvicorn.
 """
 
 from __future__ import annotations
@@ -13,14 +15,15 @@ import uvicorn
 
 from ddns_gateway.config import ConfigValidationError, load_config, parse_args
 from ddns_gateway.logging_config import build_uvicorn_log_config, setup_logging
-from ddns_gateway.server import set_preloaded_config
+from ddns_gateway.server import create_app
 
 
 def main() -> None:
     """
     Start the DDNS Gateway server.
 
-    Parse command-line arguments, load configuration, and run the server.
+    Parse command-line arguments, load configuration, create the app,
+    and run the server with uvicorn.
     """
     args = parse_args()
     try:
@@ -40,12 +43,13 @@ def main() -> None:
             'Consider using "127.0.0.1" for local-only access.',
         )
 
-    # Inject the loaded configuration into the server module to prevent
-    # re-parsing arguments when the app starts.
-    set_preloaded_config(config)
+    # Create the app using the factory function
+    app = create_app(config)
 
+    # Run the app with uvicorn, passing the app object directly
+    # This avoids reload/workers issues with import strings
     uvicorn.run(
-        "ddns_gateway.server:app",
+        app,
         host=config.server.host,
         port=config.server.port,
         log_level=config.logging.level.lower(),
