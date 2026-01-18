@@ -141,7 +141,7 @@ class TestUpsertService:
 
         assert response.status == "success"
         assert response.action == "unchanged"
-        assert response.upstream_called is False
+        assert response.upstream_called is True
         mock_provider.update_record.assert_not_called()
 
     @pytest.mark.asyncio
@@ -162,6 +162,7 @@ class TestUpsertService:
 
         assert response.status == "error"
         assert len(response.errors) > 0
+        assert response.upstream_called is False  # validation error, no upstream call
 
     @pytest.mark.asyncio
     async def test_invalid_record_type_returns_error(
@@ -185,6 +186,7 @@ class TestUpsertService:
 
         assert response.status == "error"
         assert response.errors[0].code == ErrorCode.INVALID_RECORD_TYPE
+        assert response.upstream_called is False  # validation error, no upstream call
 
     @pytest.mark.asyncio
     async def test_provider_find_error(self, mock_provider, mock_credentials):
@@ -208,6 +210,7 @@ class TestUpsertService:
 
         assert response.status == "error"
         assert response.errors[0].code == ErrorCode.UPSTREAM_API_ERROR
+        assert response.upstream_called is True  # called find_record before error
 
     @pytest.mark.asyncio
     async def test_provider_create_failure(self, mock_provider, mock_credentials):
@@ -236,6 +239,7 @@ class TestUpsertService:
 
         assert response.status == "error"
         assert "rate limited" in response.errors[0].message
+        assert response.upstream_called is True  # called create_record before error
 
     @pytest.mark.asyncio
     async def test_warnings_propagated_from_provider(
@@ -452,7 +456,7 @@ class TestDeleteService:
 
         assert response.status == "success"
         assert response.action == "unchanged"
-        assert response.upstream_called is False
+        assert response.upstream_called is True
         mock_provider.delete_record.assert_not_called()
 
     @pytest.mark.asyncio
@@ -481,6 +485,7 @@ class TestDeleteService:
 
         assert response.status == "error"
         assert "Network error" in response.errors[0].message
+        assert response.upstream_called is True  # called delete_record before error
 
     @pytest.mark.asyncio
     async def test_delete_invalid_zone(self, mock_provider, mock_credentials):
@@ -495,6 +500,7 @@ class TestDeleteService:
         )
 
         assert response.status == "error"
+        assert response.upstream_called is False  # validation error, no upstream call
 
     @pytest.mark.asyncio
     async def test_delete_invalid_record_type(self, mock_provider, mock_credentials):
@@ -510,6 +516,7 @@ class TestDeleteService:
 
         assert response.status == "error"
         assert response.errors[0].code == ErrorCode.INVALID_RECORD_TYPE
+        assert response.upstream_called is False  # validation error, no upstream call
 
 
 # =============================================================================

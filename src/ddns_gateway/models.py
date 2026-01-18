@@ -568,7 +568,9 @@ class DDNSResponse(BaseModel):
     action : ActionType | None
         The action taken: created, updated, unchanged, deleted, or deduped.
     upstream_called : bool
-        Whether the upstream provider API was called.
+        Whether the upstream provider API was called (including read-only queries).
+        `True`: Called upstream API (find/create/update/delete).
+        `False`: No upstream call (cache hit or error before upstream call).
     provider : str
         The DNS provider used.
     record : RecordInfo
@@ -622,7 +624,8 @@ class DDNSResponse(BaseModel):
         result : ResultInfo | None, optional
             Result details.
         upstream_called : bool, optional
-            Whether upstream API was called (default True).
+            Whether upstream API was called, including read-only queries (default `True`).
+            Only `False` for cache hits (action="deduped").
         warnings : list[WarningModel] | None, optional
             List of warnings.
         meta : ResponseMeta | None, optional
@@ -671,7 +674,8 @@ class DDNSResponse(BaseModel):
         record : RecordInfo
             DNS record identification.
         upstream_called : bool, optional
-            Whether upstream API was called (default False).
+            Whether upstream API was called (default `False`).
+            Typically `False`, since errors often occur before upstream calls are made.
         warnings : list[WarningModel] | None, optional
             List of warnings.
         meta : ResponseMeta | None, optional
