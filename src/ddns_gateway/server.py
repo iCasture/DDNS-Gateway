@@ -125,43 +125,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not server_token:
             return JSONResponse(
                 status_code=st_status.HTTP_401_UNAUTHORIZED,
-                content=DDNSResponse(
-                    status="error",
-                    action=None,
-                    upstream_called=False,
+                content=DDNSResponse.error(
+                    errors=ErrorModel(
+                        code=ErrorCode.MISSING_AUTH_TOKEN,
+                        message="Missing authentication token",
+                    ),
                     provider="unknown",
-                    record=RecordInfo(zone="", type="", name=""),
-                    result=None,
-                    warnings=[],
-                    errors=[
-                        ErrorModel(
-                            code=ErrorCode.MISSING_AUTH_TOKEN,
-                            message="Missing authentication token",
-                        ),
-                    ],
-                    meta=ResponseMeta(),
-                    debug=None,
+                    zone="",
+                    record_type="",
+                    record_name="",
                 ).model_dump(exclude_none=True),
             )
         if server_token not in config.auth.tokens:
             return JSONResponse(
                 status_code=st_status.HTTP_403_FORBIDDEN,
-                content=DDNSResponse(
-                    status="error",
-                    action=None,
-                    upstream_called=False,
+                content=DDNSResponse.error(
+                    errors=ErrorModel(
+                        code=ErrorCode.INVALID_AUTH_TOKEN,
+                        message="Invalid authentication token",
+                    ),
                     provider="unknown",
-                    record=RecordInfo(zone="", type="", name=""),
-                    result=None,
-                    warnings=[],
-                    errors=[
-                        ErrorModel(
-                            code=ErrorCode.INVALID_AUTH_TOKEN,
-                            message="Invalid authentication token",
-                        ),
-                    ],
-                    meta=ResponseMeta(),
-                    debug=None,
+                    zone="",
+                    record_type="",
+                    record_name="",
                 ).model_dump(exclude_none=True),
             )
 
@@ -408,9 +394,10 @@ def create_app(config: Config) -> FastAPI:
     # Add middleware for authentication
     app.add_middleware(AuthMiddleware)
 
-    # Register exception handlers
+    # Register exception handlers (order matters: more specific first)
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(Exception, generic_exception_handler)  # Fallback
 
     # Register API routes
     app.add_api_route(
@@ -443,30 +430,20 @@ async def http_exception_handler(_request: Request, exc: Exception) -> Response:
     http_exc = exc if isinstance(exc, HTTPException) else HTTPException(500, str(exc))
     return JSONResponse(
         status_code=http_exc.status_code,
-        content=DDNSResponse(
-            status="error",
-            action=None,
-            upstream_called=False,
+        content=DDNSResponse.error(
+            errors=ErrorModel(
+                code=ErrorCode.INTERNAL_ERROR,
+                message=str(http_exc.detail),
+            ),
             provider="unknown",
-            record=RecordInfo(zone="", type="", name=""),
-            result=None,
-            warnings=[],
-            errors=[
-                ErrorModel(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message=str(http_exc.detail),
-                ),
-            ],
-            meta=ResponseMeta(),
-            debug=None,
+            zone="",
+            record_type="",
+            record_name="",
         ).model_dump(exclude_none=True),
     )
 
 
-async def validation_exception_handler(
-    _request: Request,
-    exc: Exception,
-) -> Response:
+async def validation_exception_handler(_request: Request, exc: Exception) -> Response:
     """
     Handle validation errors with consistent JSON responses.
 
@@ -477,22 +454,15 @@ async def validation_exception_handler(
     if not isinstance(exc, RequestValidationError):
         return JSONResponse(
             status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=str(exc),
+                ),
                 provider="unknown",
-                record=RecordInfo(zone="", type="", name=""),
-                result=None,
-                warnings=[],
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message=str(exc),
-                    ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
+                zone="",
+                record_type="",
+                record_name="",
             ).model_dump(exclude_none=True),
         )
 
@@ -520,23 +490,75 @@ async def validation_exception_handler(
 
     return JSONResponse(
         status_code=st_status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content=DDNSResponse(
-            status="error",
-            action=None,
-            upstream_called=False,
+        content=DDNSResponse.error(
+            errors=ErrorModel(
+                code=ErrorCode.VALIDATION_ERROR,
+                message=message,
+            ),
             provider="unknown",
-            record=RecordInfo(zone="", type="", name=""),
-            result=None,
-            warnings=[],
-            errors=[
-                ErrorModel(
-                    code=ErrorCode.VALIDATION_ERROR,
-                    message=message,
-                ),
-            ],
-            meta=ResponseMeta(),
-            debug=None,
+            zone="",
+            record_type="",
+            record_name="",
         ).model_dump(exclude_none=True),
+    )
+
+
+async def generic_exception_handler(_request: Request, exc: Exception) -> Response:
+    """
+    Handle uncaught exceptions with consistent JSON responses.
+
+    This is a fallback handler that catches any exception not handled by
+    more specific handlers, ensuring the API always returns a consistent
+    DDNSResponse format.
+
+    This handler is particularly important after the DDNSResponse factory
+    method refactoring, as ``DDNSResponse.success()`` and ``DDNSResponse.error()``
+    may raise ``ValueError`` when required parameters are missing.
+
+    Parameters
+    ----------
+    _request : Request
+        The FastAPI request object.
+    exc : Exception
+        The uncaught exception.
+
+    Returns
+    -------
+    Response
+        A JSON response with error status and INTERNAL_ERROR code.
+
+    Notes
+    -----
+    This handler uses direct DDNSResponse construction (not the factory method)
+    to avoid potential infinite recursion if the factory methods themselves
+    are the source of the error.
+    """
+    logger.exception('Unhandled exception: "%s".', exc)
+
+    # IMPORTANT: Use direct construction here, NOT DDNSResponse.error()
+    # This avoids potential infinite recursion if the factory method itself
+    # is the source of the exception
+    error_response = DDNSResponse(
+        status="error",
+        action=None,
+        upstream_called=False,
+        provider="unknown",
+        record=RecordInfo(zone="", type="", name=""),
+        result=None,
+        warnings=[],
+        errors=[
+            ErrorModel(
+                code=ErrorCode.INTERNAL_ERROR,
+                message="Internal server error",
+            ),
+        ],
+        meta=ResponseMeta(),
+        debug=None,
+    )
+
+    return JSONResponse(
+        status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=error_response.model_dump(exclude_none=True),
     )
 
 
@@ -603,26 +625,19 @@ async def upsert_ddns_record(
     except ValueError:
         return JSONResponse(
             status_code=st_status.HTTP_400_BAD_REQUEST,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
-                provider=provider_lower,
-                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
-                result=None,
-                warnings=[],
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.INVALID_PROVIDER,
-                        message=(
-                            f"Invalid provider: {provider}. "
-                            f"Must be one of: {', '.join([p.value for p in DNSProvider])}."
-                        ),
-                        field="provider",
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.INVALID_PROVIDER,
+                    message=(
+                        f"Invalid provider: {provider}. "
+                        f"Must be one of: {', '.join([p.value for p in DNSProvider])}."
                     ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
+                    field="provider",
+                ),
+                provider=provider_lower,
+                zone=zone,
+                record_type=record_type.upper(),
+                record_name=record,
             ).model_dump(exclude_none=True),
         )
 
@@ -631,22 +646,15 @@ async def upsert_ddns_record(
     if provider_instance is None:
         return JSONResponse(
             status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=f"Provider {provider} not initialized",
+                ),
                 provider=provider_lower,
-                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
-                result=None,
-                warnings=[],
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message=f"Provider {provider} not initialized",
-                    ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
+                zone=zone,
+                record_type=record_type.upper(),
+                record_name=record,
             ).model_dump(exclude_none=True),
         )
 
@@ -697,23 +705,17 @@ async def upsert_ddns_record(
     if not final_value:
         return JSONResponse(
             status_code=st_status.HTTP_400_BAD_REQUEST,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message="Missing required field: value",
+                    field="value",
+                ),
                 provider=provider_lower,
-                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
-                result=None,
+                zone=zone,
+                record_type=record_type.upper(),
+                record_name=record,
                 warnings=api_warnings,
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.VALIDATION_ERROR,
-                        message="Missing required field: value",
-                        field="value",
-                    ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
             ).model_dump(exclude_none=True),
         )
 
@@ -815,26 +817,19 @@ async def delete_ddns_record(
     except ValueError:
         return JSONResponse(
             status_code=st_status.HTTP_400_BAD_REQUEST,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
-                provider=provider_lower,
-                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
-                result=None,
-                warnings=[],
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.INVALID_PROVIDER,
-                        message=(
-                            f"Invalid provider: {provider}. "
-                            f"Must be one of: {', '.join([p.value for p in DNSProvider])}"
-                        ),
-                        field="provider",
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.INVALID_PROVIDER,
+                    message=(
+                        f"Invalid provider: {provider}. "
+                        f"Must be one of: {', '.join([p.value for p in DNSProvider])}"
                     ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
+                    field="provider",
+                ),
+                provider=provider_lower,
+                zone=zone,
+                record_type=record_type.upper(),
+                record_name=record,
             ).model_dump(exclude_none=True),
         )
 
@@ -843,22 +838,15 @@ async def delete_ddns_record(
     if provider_instance is None:
         return JSONResponse(
             status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=DDNSResponse(
-                status="error",
-                action=None,
-                upstream_called=False,
+            content=DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=f"Provider {provider} not initialized",
+                ),
                 provider=provider_lower,
-                record=RecordInfo(zone=zone, type=record_type.upper(), name=record),
-                result=None,
-                warnings=[],
-                errors=[
-                    ErrorModel(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message=f"Provider {provider} not initialized",
-                    ),
-                ],
-                meta=ResponseMeta(),
-                debug=None,
+                zone=zone,
+                record_type=record_type.upper(),
+                record_name=record,
             ).model_dump(exclude_none=True),
         )
 
