@@ -118,147 +118,6 @@ def _build_debug_dict(
     return result
 
 
-def _build_error_response(
-    provider: str,
-    zone: str,
-    record_type: str,
-    record: str,
-    error: ErrorModel,
-    *,
-    upstream_called: bool = False,
-    warnings: list[WarningModel] | None = None,
-    include_debug_info: bool = False,
-    raw_input: dict[str, Any] | None = None,
-    normalized: dict[str, Any] | None = None,
-) -> DDNSResponse:
-    """
-    Build an error DDNSResponse.
-
-    Parameters
-    ----------
-    provider : str
-        The DNS provider name.
-    zone : str
-        The DNS zone.
-    record_type : str
-        The record type.
-    record : str
-        The record name.
-    error : ErrorModel
-        The error to include.
-    upstream_called : bool, optional
-        Whether upstream API was called before the error occurred (default False).
-    warnings : list[WarningModel] | None
-        Optional warnings to include.
-    include_debug_info : bool
-        Whether to include debug information in the response.
-    raw_input : dict[str, Any] | None
-        Raw input dictionary for debug info.
-    normalized : dict[str, Any] | None
-        Normalized dictionary for debug info (may be None for validation errors).
-
-    Returns
-    -------
-    DDNSResponse
-        The error response.
-    """
-    debug: DebugInfo | None = None
-    if include_debug_info and raw_input is not None:
-        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
-
-    return DDNSResponse(
-        status="error",
-        action=None,
-        upstream_called=upstream_called,
-        provider=provider,
-        record=RecordInfo(zone=zone, type=record_type, name=record),
-        result=None,
-        warnings=warnings or [],
-        errors=[error],
-        meta=ResponseMeta(),
-        debug=debug,
-    )
-
-
-def _build_success_response(
-    provider: str,
-    zone: str,
-    record_type: str,
-    record: str,
-    action: str,
-    upstream_called: bool,  # noqa: FBT001
-    *,
-    effective: EffectiveValues | None = None,
-    upstream: UpstreamInfo | None = None,
-    previous_value: str | None = None,
-    warnings: list[WarningModel] | None = None,
-    include_debug_info: bool = False,
-    raw_input: dict[str, Any] | None = None,
-    normalized: dict[str, Any] | None = None,
-) -> DDNSResponse:
-    """
-    Build a success DDNSResponse.
-
-    Parameters
-    ----------
-    provider : str
-        The DNS provider name.
-    zone : str
-        The DNS zone.
-    record_type : str
-        The record type.
-    record : str
-        The record name.
-    action : str
-        The action taken.
-    upstream_called : bool
-        Whether the upstream API was called.
-    effective : EffectiveValues | None
-        The effective values after operation.
-    upstream : UpstreamInfo | None
-        The upstream operation info.
-    previous_value : str | None
-        The previous value (for updates).
-    warnings : list[WarningModel] | None
-        Optional warnings to include.
-    include_debug_info : bool
-        Whether to include debug information in the response.
-    raw_input : dict[str, Any] | None
-        Raw input dictionary for debug info.
-    normalized : dict[str, Any] | None
-        Normalized dictionary for debug info.
-
-    Returns
-    -------
-    DDNSResponse
-        The success response.
-    """
-    result = None
-    if effective or upstream:
-        result = ResultInfo(
-            effective=effective,
-            upstream=upstream,
-            previous_value=previous_value,
-        )
-
-    debug: DebugInfo | None = None
-    if include_debug_info and raw_input is not None:
-        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
-
-    return DDNSResponse(
-        status="success",
-        action=action,  # type: ignore[arg-type]
-        upstream_called=upstream_called,
-        provider=provider,
-        record=RecordInfo(zone=zone, type=record_type, name=record),
-        result=result,
-        warnings=warnings or [],
-        errors=[],
-        meta=ResponseMeta(),
-        debug=debug,
-    )
-
-
 def _build_deduped_response(
     resp_dict: dict[str, Any],
     window_seconds: int,
@@ -267,6 +126,7 @@ def _build_deduped_response(
     include_debug_info: bool = False,
     raw_input: dict[str, Any] | None = None,
     normalized: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> DDNSResponse:
     """
     Build DDNSResponse from a deduped response dictionary.
@@ -285,6 +145,8 @@ def _build_deduped_response(
         Raw input dictionary for debug info.
     normalized : dict[str, Any] | None
         Normalized dictionary for debug info.
+    extra : dict[str, Any] | None
+        Additional custom debug information for troubleshooting.
 
     Returns
     -------
@@ -304,7 +166,7 @@ def _build_deduped_response(
 
     debug: DebugInfo | None = None
     if include_debug_info and raw_input is not None:
-        debug = DebugInfo(raw_input=raw_input, normalized=normalized)
+        debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
 
     # Convert warnings to WarningModel objects (they may be dicts from build_deduped_response)
     warnings_list: list[WarningModel] = []
@@ -440,12 +302,12 @@ async def upsert_record_service(
         try:
             record_type_enum = RecordType(record_type.upper())
         except ValueError:
-            return _build_error_response(
+            return DDNSResponse.error(
                 provider=provider,
                 zone=zone,
                 record_type=record_type,
-                record=record,
-                error=ErrorModel(
+                record_name=record,
+                errors=ErrorModel(
                     code=ErrorCode.INVALID_RECORD_TYPE,
                     message=f"Invalid record type: {record_type}",
                     field="type",
@@ -460,12 +322,12 @@ async def upsert_record_service(
         norm_comment = normalize_comment(comment)
 
     except NormalizeError as e:
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=zone,
             record_type=record_type,
-            record=record,
-            error=ErrorModel(
+            record_name=record,
+            errors=ErrorModel(
                 code=e.code,
                 message=e.message,
                 field=e.field,
@@ -589,15 +451,15 @@ async def upsert_record_service(
                 "[service: upsert] Singleflight wait timeout: %s...",
                 dedupe_key[:16],
             )
-            return _build_error_response(
-                provider=provider,
-                zone=norm_zone,
-                record_type=record_type_enum.value,
-                record=norm_record,
-                error=ErrorModel(
+            return DDNSResponse.error(
+                errors=ErrorModel(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
                 ),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record_name=norm_record,
                 warnings=warnings,
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
@@ -623,15 +485,15 @@ async def upsert_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
-            provider=provider,
-            zone=norm_zone,
-            record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+        return DDNSResponse.error(
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
             upstream_called=True,
             warnings=warnings,
             include_debug_info=include_debug_info,
@@ -668,15 +530,15 @@ async def upsert_record_service(
             # Clear singleflight so waiters get notified
             if dedupe_cache is not None and is_leader and dedupe_key:
                 await dedupe_cache.clear_in_flight(dedupe_key)
-            return _build_error_response(
-                provider=provider,
-                zone=norm_zone,
-                record_type=record_type_enum.value,
-                record=norm_record,
-                error=ErrorModel(
+            return DDNSResponse.error(
+                errors=ErrorModel(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=f"Failed to create record: {e}",
                 ),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record_name=norm_record,
                 upstream_called=True,
                 warnings=warnings,
                 include_debug_info=include_debug_info,
@@ -688,12 +550,12 @@ async def upsert_record_service(
             # Clear singleflight so waiters get notified
             if dedupe_cache is not None and is_leader and dedupe_key:
                 await dedupe_cache.clear_in_flight(dedupe_key)
-            return _build_error_response(
+            return DDNSResponse.error(
                 provider=provider,
                 zone=norm_zone,
                 record_type=record_type_enum.value,
-                record=norm_record,
-                error=ErrorModel(
+                record_name=norm_record,
+                errors=ErrorModel(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=result.message,
                 ),
@@ -727,12 +589,12 @@ async def upsert_record_service(
             )
 
         combined_warnings = warnings + (result.warnings or [])
-        return _build_success_response(
+        return DDNSResponse.success(
+            action="created",
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            action="created",
+            record_name=norm_record,
             upstream_called=True,
             effective=EffectiveValues(
                 value=norm_value,
@@ -789,12 +651,12 @@ async def upsert_record_service(
                 ),
             )
 
-        return _build_success_response(
+        return DDNSResponse.success(
+            action="unchanged",
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            action="unchanged",
+            record_name=norm_record,
             upstream_called=True,
             effective=EffectiveValues(
                 value=existing_value,
@@ -829,12 +691,12 @@ async def upsert_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+            record_name=norm_record,
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to update record: {e}",
             ),
@@ -849,12 +711,12 @@ async def upsert_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+            record_name=norm_record,
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=result.message,
             ),
@@ -897,12 +759,12 @@ async def upsert_record_service(
         )
 
     combined_warnings = warnings + (result.warnings or [])
-    return _build_success_response(
+    return DDNSResponse.success(
+        action="updated",
         provider=provider,
         zone=norm_zone,
         record_type=record_type_enum.value,
-        record=norm_record,
-        action="updated",
+        record_name=norm_record,
         upstream_called=True,
         effective=EffectiveValues(
             value=norm_value,
@@ -998,12 +860,12 @@ async def delete_record_service(
         try:
             record_type_enum = RecordType(record_type.upper())
         except ValueError:
-            return _build_error_response(
+            return DDNSResponse.error(
                 provider=provider,
                 zone=zone,
                 record_type=record_type,
-                record=record,
-                error=ErrorModel(
+                record_name=record,
+                errors=ErrorModel(
                     code=ErrorCode.INVALID_RECORD_TYPE,
                     message=f"Invalid record type: {record_type}",
                     field="type",
@@ -1014,12 +876,12 @@ async def delete_record_service(
             )
 
     except NormalizeError as e:
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=zone,
             record_type=record_type,
-            record=record,
-            error=ErrorModel(
+            record_name=record,
+            errors=ErrorModel(
                 code=e.code,
                 message=e.message,
                 field=e.field,
@@ -1108,12 +970,12 @@ async def delete_record_service(
                 "[service: delete] Singleflight wait timeout: %s...",
                 dedupe_key[:16],
             )
-            return _build_error_response(
+            return DDNSResponse.error(
                 provider=provider,
                 zone=norm_zone,
                 record_type=record_type_enum.value,
-                record=norm_record,
-                error=ErrorModel(
+                record_name=norm_record,
+                errors=ErrorModel(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
                 ),
@@ -1141,12 +1003,12 @@ async def delete_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+            record_name=norm_record,
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
@@ -1187,12 +1049,12 @@ async def delete_record_service(
                     warnings=warnings,
                 ),
             )
-        return _build_success_response(
+        return DDNSResponse.success(
+            action="unchanged",
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            action="unchanged",
+            record_name=norm_record,
             upstream_called=True,
             warnings=warnings,
             include_debug_info=include_debug_info,
@@ -1218,12 +1080,12 @@ async def delete_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+            record_name=norm_record,
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to delete record: {e}",
             ),
@@ -1237,12 +1099,12 @@ async def delete_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
-        return _build_error_response(
+        return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
-            record=norm_record,
-            error=ErrorModel(
+            record_name=norm_record,
+            errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=result.message,
             ),
@@ -1275,12 +1137,12 @@ async def delete_record_service(
             ),
         )
 
-    return _build_success_response(
+    return DDNSResponse.success(
+        action="deleted",
         provider=provider,
         zone=norm_zone,
         record_type=record_type_enum.value,
-        record=norm_record,
-        action="deleted",
+        record_name=norm_record,
         upstream_called=True,
         upstream=UpstreamInfo(
             record_id=result.record_id or existing.record_id,

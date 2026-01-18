@@ -4,6 +4,7 @@
 
 /config.toml
 /temp/
+/tmp/
 /data/
 /logs/
 *.log

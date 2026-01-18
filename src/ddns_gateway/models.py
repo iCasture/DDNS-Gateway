@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self, overload
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -412,14 +412,19 @@ class DebugInfo(BaseModel):
 
     Attributes
     ----------
-    raw_input : dict[str, Any] | None
-        The raw input parameters before normalization.
+    raw_input : dict[str, Any]
+        The raw input parameters before normalization. Required.
     normalized : dict[str, Any] | None
-        The normalized parameters used for the operation.
+        The normalized parameters used for the operation. May be None if
+        an error occurred before normalization.
+    extra : dict[str, Any] | None
+        Additional custom debug information for troubleshooting. May contain
+        any key-value pairs useful for diagnosing issues.
     """
 
-    raw_input: dict[str, Any] | None = None
+    raw_input: dict[str, Any]
     normalized: dict[str, Any] | None = None
+    extra: dict[str, Any] | None = None
 
 
 # =============================================================================
@@ -500,9 +505,11 @@ class ResultInfo(BaseModel):
     Attributes
     ----------
     effective : EffectiveValues | None
-        The effective record values after the operation.
+        The effective record values after the operation. Required for
+        create/update/unchanged actions, None for delete actions.
     upstream : UpstreamInfo | None
-        Upstream provider operation details.
+        Upstream provider operation details. May be None when record_id
+        is not available (e.g., some deduped responses).
     previous_value : str | None
         The previous record value (for action=updated).
     """
@@ -599,106 +606,456 @@ class DDNSResponse(BaseModel):
     debug: DebugInfo | None = None
 
     @classmethod
-    def success(
+    def success(  # noqa: PLR0913
         cls,
         action: ActionType,
         provider: str,
-        record: RecordInfo,
+        *,
+        # # # # # # #
+        # Record-related
+        # # # # # # #
+        # Pre-built RecordInfo object
+        record: RecordInfo | None = None,
+        # Separate params to build RecordInfo
+        zone: str | None = None,
+        record_type: str | None = None,
+        record_name: str | None = None,
+        # # # # # # #
+        # Result-related
+        # # # # # # #
+        # Pre-built ResultInfo object
         result: ResultInfo | None = None,
-        upstream_called: bool = True,  # noqa: FBT001, FBT002
-        warnings: list[WarningModel] | None = None,
-        meta: ResponseMeta | None = None,
+        # Separate params to build ResultInfo
+        effective: EffectiveValues | None = None,
+        upstream: UpstreamInfo | None = None,
+        previous_value: str | None = None,
+        # # # # # # #
+        # Debug-related
+        # # # # # # #
+        include_debug_info: bool = False,
+        # Pre-built DebugInfo object
         debug: DebugInfo | None = None,
-    ) -> DDNSResponse:
+        # Separate params to build DebugInfo
+        raw_input: dict[str, Any] | None = None,
+        normalized: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+        # # # # # # #
+        # Other fields
+        # # # # # # #
+        upstream_called: bool = True,
+        warnings: WarningModel | list[WarningModel] | None = None,
+        meta: ResponseMeta | None = None,
+    ) -> Self:
         """
-        Create a successful response.
+        Create a successful response (DDNSResponse).
+
+        This factory builds a DDNSResponse with ``status="success"`` and a required
+        RecordInfo. It supports flexible inputs for RecordInfo, ResultInfo, ``warnings``,
+        and DebugInfo.
+
+        RecordInfo input styles
+        -----------------------
+        RecordInfo is **required**. Provide it in one of the following ways:
+
+        1. **Composite object style** (recommended for tests / callers that already
+           have a RecordInfo instance):
+
+           >>> DDNSResponse.success(
+           ...     action="created",
+           ...     provider="cloudflare",
+           ...     record=RecordInfo(zone="example.com", type="A", name="home"),
+           ... )
+
+           When ``record`` is provided, the separate parameters ``zone``,
+           ``record_type``, and ``record_name`` are ignored.
+
+        2. **Separate parameter style** (recommended for service layer):
+
+           >>> DDNSResponse.success(
+           ...     action="created",
+           ...     provider="cloudflare",
+           ...     zone="example.com",
+           ...     record_type="A",
+           ...     record_name="home",
+           ... )
+
+           In this mode, all three of ``zone``, ``record_type``, and ``record_name``
+           must be provided, and ``record`` must be ``None`` (default).
+
+        ResultInfo behavior
+        -------------------
+        ResultInfo is optional and represents the outcome of the operation. It can be
+        provided in two ways:
+
+        1. **Composite object style**: pass ``result=ResultInfo(...)`` directly.
+
+        2. **Construct internally**: provide one or more of the following parameters:
+        ``effective``, ``upstream``, and (optionally) ``previous_value``.
+
+        Semantics of ResultInfo fields:
+
+        - ``effective`` represents the resulting record values and is present for
+          create, update, and unchanged operations.
+        - ``upstream`` contains provider-side identifiers (e.g., record ID, zone ID)
+          when available.
+        - ``previous_value`` is only meaningful for update operations and **must**
+          be accompanied by ``effective``.
+
+        When ``result`` is provided, it takes priority and all separate ResultInfo
+        parameters are ignored.
+
+        Providing ``previous_value`` without ``effective`` (and without a pre-built
+        ``result``) is considered invalid and raises ``ValueError``.
+
+        Warnings normalization
+        ----------------------
+        - ``warnings`` accepts ``None``, a single WarningModel, or a list of WarningModel.
+        Internally it is always stored as a list.
+
+        DebugInfo behavior (gated by ``include_debug_info``)
+        ----------------------------------------------------
+        Debug info is optional and is only included when ``include_debug_info`` is ``True``.
+        It can be provided in two ways:
+
+        1. **Composite object style**: pass ``debug=DebugInfo(...)`` directly.
+
+        2. **Construct internally**: set ``include_debug_info=True`` and provide
+        ``raw_input`` (``normalized`` and ``extra`` are optional). DebugInfo is only
+        constructed when ``include_debug_info`` is ``True`` *and* ``raw_input`` is not
+        ``None``.
+
+        When ``include_debug_info`` is ``True`` and ``debug`` is provided, it takes
+        priority and ``raw_input``/``normalized``/``extra`` are ignored.
 
         Parameters
         ----------
         action : ActionType
-            The action that was taken.
+            The action taken: "created", "updated", "unchanged", "deleted",
+            or "deduped".
         provider : str
-            The DNS provider used.
-        record : RecordInfo
-            DNS record identification.
+            The DNS provider name (e.g., "cloudflare", "aliyun", "tencent").
+
+        record : RecordInfo | None, optional
+            Pre-built record info object. If provided, ``zone``, ``record_type``,
+            ``record_name`` are ignored.
+        zone : str | None, optional
+            DNS zone (e.g., "example.com"). Required if ``record`` is None.
+        record_type : str | None, optional
+            Record type (e.g., "A", "AAAA"). Required if ``record`` is None.
+        record_name : str | None, optional
+            Record name (e.g., "home", "@"). Required if ``record`` is None.
+
         result : ResultInfo | None, optional
-            Result details.
-        upstream_called : bool, optional
-            Whether upstream API was called, including read-only queries (default `True`).
-            Only `False` for cache hits (action="deduped").
-        warnings : list[WarningModel] | None, optional
-            List of warnings.
-        meta : ResponseMeta | None, optional
-            Response metadata.
+            Pre-built result info. If provided, ``effective``, ``upstream``,
+            ``previous_value`` are ignored.
+        effective : EffectiveValues | None, optional
+            Effective values after the operation. Used to build ``result`` internally.
+        upstream : UpstreamInfo | None, optional
+            Upstream provider info. Used to build ``result`` internally.
+        previous_value : str | None, optional
+            Previous record value for update operations. Requires ``effective`` when
+            building ResultInfo internally.
+
+        include_debug_info : bool, optional
+            Whether to include debug info (default ``False``).
         debug : DebugInfo | None, optional
-            Debug information.
+            Pre-built debug info. If provided, ``raw_input`` and ``normalized`` are ignored.
+            Used only when ``include_debug_info`` is ``True``.
+        raw_input : dict[str, Any] | None, optional
+            Raw input for debug info. Required if ``include_debug_info`` is ``True``
+            and ``debug`` is not provided.
+        normalized : dict[str, Any] | None, optional
+            Normalized input for debug info. Optional; may be ``None`` if normalization
+            did not occur.
+        extra : dict[str, Any] | None, optional
+            Additional custom debug information. Optional; may contain any key-value
+            pairs useful for diagnosing issues.
+
+        upstream_called : bool, optional
+            Whether upstream API was called before the error (default ``True``).
+            Only False for cache hits (``action="deduped"``).
+        warnings : WarningModel | list[WarningModel] | None, optional
+            Warning(s) to include. Internally normalized to a list.
+        meta : ResponseMeta | None, optional
+            Response metadata. If ``None``, a new ResponseMeta is created.
 
         Returns
         -------
         DDNSResponse
-            A success response instance.
+            A success response instance (``status="success"``), with ``warnings`` always stored as a list.
+
+        Raises
+        ------
+        ValueError
+            If RecordInfo cannot be built (i.e., neither ``record`` nor a complete
+            set of (``zone``, ``record_type``, ``record_name``) is provided, or if
+            ``previous_value`` is provided without ``effective`` when building
+            ResultInfo internally.
         """
+        # 1. Normalize warnings to list format
+        # success() accepts either a single WarningModel, a list, or None.
+        # Internally, we always store warnings as a list.
+        if isinstance(warnings, list):
+            _warnings = warnings
+        elif warnings is not None:
+            _warnings = [warnings]
+        else:
+            _warnings = []
+
+        # 2. Build RecordInfo (prefer pre-built object, fallback to separate params)
+        # RecordInfo is required and all its fields (zone, type, name) are mandatory,
+        # so we must have either a complete object or all three separate params.
+        if record is not None:
+            _record = record
+        elif zone is not None and record_type is not None and record_name is not None:
+            _record = RecordInfo(zone=zone, type=record_type, name=record_name)
+        else:
+            msg = "Must provide either 'record' or all of 'zone', 'record_type', 'record_name'."
+            raise ValueError(msg)
+
+        # 3. Build ResultInfo (prefer pre-built object, fallback to separate params)
+        # ResultInfo is optional. We only build it when meaningful data exists.
+        #
+        # Semantics:
+        # - effective: present for create/update/unchanged (the resulting record values)
+        # - upstream: present when provider-side identifiers (e.g., record_id, zone_id) are available
+        # - previous_value: only meaningful for update operations and MUST be accompanied
+        #   by effective; providing previous_value without effective is considered invalid
+        #
+        # Therefore:
+        # - Checking (effective or upstream) is sufficient; previous_value alone
+        #   would never occur without effective.
+        # - If previous_value is provided without effective (and no pre-built result),
+        #   raise ValueError to avoid silently discarding invalid data.
+        _result: ResultInfo | None = result
+
+        if _result is None:
+            if effective is None and previous_value is not None:
+                msg = "'previous_value' requires 'effective' when building ResultInfo."
+                raise ValueError(msg)
+
+            if effective is not None or upstream is not None:
+                _result = ResultInfo(
+                    effective=effective,
+                    upstream=upstream,
+                    previous_value=previous_value,
+                )
+
+        # 4. Build DebugInfo (prefer pre-built object, fallback to separate params)
+        # DebugInfo is optional and only included when explicitly requested.
+        # - raw_input: required field in DebugInfo (no raw_input = no debug info)
+        # - normalized: optional, may be None if error occurred before normalization
+        # - extra: optional, may contain any custom debug information
+        _debug: DebugInfo | None = None
+        if include_debug_info:
+            _debug = debug
+            if _debug is None and raw_input is not None:
+                _debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
+
         return cls(
             status="success",
             action=action,
             upstream_called=upstream_called,
             provider=provider,
-            record=record,
-            result=result,
-            warnings=warnings or [],
+            record=_record,
+            result=_result,
+            warnings=_warnings,
             errors=[],
             meta=meta or ResponseMeta(),
-            debug=debug,
+            debug=_debug,
         )
 
     @classmethod
-    def error(
+    def error(  # noqa: PLR0913
         cls,
-        errors: list[ErrorModel],
+        errors: ErrorModel | list[ErrorModel],
         provider: str,
-        record: RecordInfo,
-        upstream_called: bool = False,  # noqa: FBT001, FBT002
-        warnings: list[WarningModel] | None = None,
-        meta: ResponseMeta | None = None,
+        *,
+        # Record-related
+        # # # # # # #
+        # Pre-built RecordInfo object
+        record: RecordInfo | None = None,
+        # Separate params to build RecordInfo
+        zone: str | None = None,
+        record_type: str | None = None,
+        record_name: str | None = None,
+        # # # # # # #
+        # Debug-related
+        # # # # # # #
+        include_debug_info: bool = False,
+        # Pre-built DebugInfo object
         debug: DebugInfo | None = None,
-    ) -> DDNSResponse:
+        # Separate params to build DebugInfo
+        raw_input: dict[str, Any] | None = None,
+        normalized: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+        # # # # # # #
+        # Other fields
+        # # # # # # #
+        upstream_called: bool = False,
+        warnings: WarningModel | list[WarningModel] | None = None,
+        meta: ResponseMeta | None = None,
+    ) -> Self:
         """
-        Create an error response.
+        Create an error response (DDNSResponse).
+
+        This factory builds a DDNSResponse with ``status="error"`` and a required
+        RecordInfo. It supports flexible inputs for ``errors``, ``warnings``,
+        RecordInfo, and DebugInfo.
+
+        RecordInfo input styles
+        -----------------------
+        RecordInfo is **required**. Provide it in one of the following ways:
+
+        1. **Composite object style** (recommended for tests / callers that already
+           have a RecordInfo instance):
+
+           >>> DDNSResponse.error(
+           ...     errors=ErrorModel(code="ZONE_NOT_FOUND", message="Zone not found"),
+           ...     provider="cloudflare",
+           ...     record=RecordInfo(zone="example.com", type="A", name="home"),
+           ... )
+
+           When ``record`` is provided, the separate parameters ``zone``,
+           ``record_type``, and ``record_name`` are ignored.
+
+        2. **Separate parameter style** (recommended for service layer):
+
+           >>> DDNSResponse.error(
+           ...     errors=ErrorModel(code="ZONE_NOT_FOUND", message="Zone not found"),
+           ...     provider="cloudflare",
+           ...     zone="example.com",
+           ...     record_type="A",
+           ...     record_name="home",
+           ... )
+
+           In this mode, all three of ``zone``, ``record_type``, and ``record_name``
+           must be provided, and ``record`` must be ``None`` (default).
+
+        Errors and warnings normalization
+        ---------------------------------
+        - ``errors`` accepts either a single ErrorModel or a list of ErrorModel.
+          Internally it is always stored as a list.
+
+        - ``warnings`` accepts ``None``, a single WarningModel, or a list of WarningModel.
+          Internally it is always stored as a list.
+
+        DebugInfo behavior (gated by ``include_debug_info``)
+        ----------------------------------------------------
+        Debug info is optional and is only included when ``include_debug_info`` is ``True``.
+        It can be provided in two ways:
+
+        1. **Composite object style**: pass ``debug=DebugInfo(...)`` directly.
+
+        2. **Construct internally**: set ``include_debug_info=True`` and provide
+           ``raw_input`` (``normalized`` and ``extra`` are optional). DebugInfo is only
+           constructed when ``include_debug_info`` is ``True`` **and** ``raw_input`` is
+           not ``None``.
+
+        When ``include_debug_info`` is ``True`` and ``debug`` is provided, it takes
+        priority and ``raw_input``/``normalized``/``extra`` are ignored.
 
         Parameters
         ----------
-        errors : list[ErrorModel]
-            List of errors.
+        errors : ErrorModel | list[ErrorModel]
+            Error(s) to include in the response. A single ErrorModel is wrapped into
+            a one-element list.
         provider : str
-            The DNS provider used.
-        record : RecordInfo
-            DNS record identification.
-        upstream_called : bool, optional
-            Whether upstream API was called (default `False`).
-            Typically `False`, since errors often occur before upstream calls are made.
-        warnings : list[WarningModel] | None, optional
-            List of warnings.
-        meta : ResponseMeta | None, optional
-            Response metadata.
+            The DNS provider name.
+
+        record : RecordInfo | None, optional
+            Pre-built record info object. If provided, ``zone``, ``record_type``,
+            ``record_name`` are ignored.
+        zone : str | None, optional
+            DNS zone (e.g., "example.com"). Required if ``record`` is ``None``.
+        record_type : str | None, optional
+            Record type (e.g., "A", "AAAA"). Required if ``record`` is ``None``.
+        record_name : str | None, optional
+            Record name (e.g., "home", "@"). Required if ``record`` is ``None``.
+
+        include_debug_info : bool, optional
+            Whether to include debug info (default ``False``).
         debug : DebugInfo | None, optional
-            Debug information.
+            Pre-built debug info. If provided, ``raw_input`` and ``normalized`` are ignored.
+            Used only when ``include_debug_info`` is ``True``.
+        raw_input : dict[str, Any] | None, optional
+            Raw input for debug info. Required if ``include_debug_info`` is ``True``
+            and ``debug`` is not provided.
+        normalized : dict[str, Any] | None, optional
+            Normalized input for debug info. Optional; may be ``None`` if
+            normalization did not happen before the error.
+        extra : dict[str, Any] | None, optional
+            Additional custom debug information. Optional; may contain any key-value
+            pairs useful for diagnosing issues.
+
+        upstream_called : bool, optional
+            Whether upstream API was called before the error (default ``False``).
+        warnings : WarningModel | list[WarningModel] | None, optional
+            Warning(s) to include. Internally normalized to a list.
+        meta : ResponseMeta | None, optional
+            Response metadata. If ``None``, a new ResponseMeta is created.
 
         Returns
         -------
         DDNSResponse
-            An error response instance.
+            An error response instance (``status="error"``), with ``errors`` always
+            a list and ``warnings`` always a list.
+
+
+        Raises
+        ------
+        ValueError
+            If RecordInfo cannot be built (i.e., neither ``record`` nor a complete
+            set of (``zone``, ``record_type``, ``record_name``) is provided).
         """
+        # 1. Normalize errors to list format
+        # error() accepts either a single ErrorModel or a list for convenience.
+        # Internally, we always store errors as a list.
+        _errors = errors if isinstance(errors, list) else [errors]
+
+        # 2. Normalize warnings to list format
+        # error() accepts either a single WarningModel, a list, or None.
+        # Internally, we always store warnings as a list.
+        if isinstance(warnings, list):
+            _warnings = warnings
+        elif warnings is not None:
+            _warnings = [warnings]
+        else:
+            _warnings = []
+
+        # 3. Build RecordInfo (prefer pre-built object, fallback to separate params)
+        # RecordInfo is required and all its fields (zone, type, name) are mandatory,
+        # so we must have either a complete object or all three separate params.
+        if record is not None:
+            _record = record
+        elif zone is not None and record_type is not None and record_name is not None:
+            _record = RecordInfo(zone=zone, type=record_type, name=record_name)
+        else:
+            msg = "Must provide either 'record' or all of 'zone', 'record_type', 'record_name'."
+            raise ValueError(msg)
+
+        # 4. Build DebugInfo (prefer pre-built object, fallback to separate params)
+        # DebugInfo is optional and only included when explicitly requested.
+        # - raw_input: required field in DebugInfo (no raw_input = no debug info)
+        # - normalized: optional, may be None if error occurred before normalization
+        # - extra: optional, may contain any custom debug information
+        _debug: DebugInfo | None = None
+        if include_debug_info:
+            _debug = debug
+            if _debug is None and raw_input is not None:
+                _debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
+
         return cls(
             status="error",
             action=None,
             upstream_called=upstream_called,
             provider=provider,
-            record=record,
+            record=_record,
             result=None,
-            warnings=warnings or [],
-            errors=errors,
+            warnings=_warnings,
+            errors=_errors,
             meta=meta or ResponseMeta(),
-            debug=debug,
+            debug=_debug,
         )
 
     def to_plain_text(self) -> str:
