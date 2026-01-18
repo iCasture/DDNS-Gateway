@@ -58,7 +58,7 @@ class CachedResponseBase:
 
     When responding to a cache hit, override:
     - action -> "deduped" (not original_action)
-    - upstream_called -> False
+    - upstream_called -> False (cache hit means no upstream API call at all)
 
     And generate fresh:
     - meta.request_id
@@ -702,7 +702,7 @@ def build_deduped_response(
 
     Creates a new response dict from the cached base, overriding:
     - action -> "deduped"
-    - upstream_called -> False
+    - upstream_called -> False (no upstream call, served from cache)
     - meta -> fresh (new request_id, timestamp, dedupe.hit=True)
 
     CACHE POLLUTION WARNING:

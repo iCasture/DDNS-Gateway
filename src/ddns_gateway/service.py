@@ -125,6 +125,7 @@ def _build_error_response(
     record: str,
     error: ErrorModel,
     *,
+    upstream_called: bool = False,
     warnings: list[WarningModel] | None = None,
     include_debug_info: bool = False,
     raw_input: dict[str, Any] | None = None,
@@ -145,6 +146,8 @@ def _build_error_response(
         The record name.
     error : ErrorModel
         The error to include.
+    upstream_called : bool, optional
+        Whether upstream API was called before the error occurred (default False).
     warnings : list[WarningModel] | None
         Optional warnings to include.
     include_debug_info : bool
@@ -166,7 +169,7 @@ def _build_error_response(
     return DDNSResponse(
         status="error",
         action=None,
-        upstream_called=False,
+        upstream_called=upstream_called,
         provider=provider,
         record=RecordInfo(zone=zone, type=record_type, name=record),
         result=None,
@@ -629,6 +632,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            upstream_called=True,
             warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
@@ -673,6 +677,7 @@ async def upsert_record_service(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=f"Failed to create record: {e}",
                 ),
+                upstream_called=True,
                 warnings=warnings,
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
@@ -692,6 +697,7 @@ async def upsert_record_service(
                     code=ErrorCode.UPSTREAM_API_ERROR,
                     message=result.message,
                 ),
+                upstream_called=True,
                 warnings=warnings + (result.warnings or []),
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
@@ -789,7 +795,7 @@ async def upsert_record_service(
             record_type=record_type_enum.value,
             record=norm_record,
             action="unchanged",
-            upstream_called=False,
+            upstream_called=True,
             effective=EffectiveValues(
                 value=existing_value,
                 ttl=existing.ttl,
@@ -832,6 +838,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to update record: {e}",
             ),
+            upstream_called=True,
             warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
@@ -851,6 +858,7 @@ async def upsert_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=result.message,
             ),
+            upstream_called=True,
             warnings=warnings + (result.warnings or []),
             include_debug_info=include_debug_info,
             raw_input=raw_input,
@@ -1142,6 +1150,7 @@ async def delete_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to query existing record: {e}",
             ),
+            upstream_called=True,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -1184,7 +1193,7 @@ async def delete_record_service(
             record_type=record_type_enum.value,
             record=norm_record,
             action="unchanged",
-            upstream_called=False,
+            upstream_called=True,
             warnings=warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
@@ -1218,6 +1227,7 @@ async def delete_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=f"Failed to delete record: {e}",
             ),
+            upstream_called=True,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
@@ -1236,6 +1246,7 @@ async def delete_record_service(
                 code=ErrorCode.UPSTREAM_API_ERROR,
                 message=result.message,
             ),
+            upstream_called=True,
             warnings=result.warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
