@@ -372,7 +372,7 @@ async def upsert_record_service(
     4. Call provider.find_record()
     5. If not found: call provider.create_record()
     6. If found: compare -> call provider.update_record() if different,
-       else return nochange
+       else return unchanged
     7. [Reserved] Update dedupe cache
     8. Build and return DDNSResponse
 
@@ -937,7 +937,7 @@ async def delete_record_service(
     2. [Reserved] Compute dedupe key (value/ttl/comment/proxied = None)
     3. [Reserved] Check dedupe cache -> short-circuit if hit
     4. Call provider.find_record()
-    5. If not found: return nochange (success)
+    5. If not found: return unchanged (success)
     6. If found: call provider.delete_record()
     7. [Reserved] Update dedupe cache
     8. Build and return DDNSResponse
@@ -1148,7 +1148,7 @@ async def delete_record_service(
         )
 
     # -------------------------------------------------------------------------
-    # Step 5: Return nochange if not found
+    # Step 5: Return unchanged if not found
     # -------------------------------------------------------------------------
     if existing is None:
         warnings.append(

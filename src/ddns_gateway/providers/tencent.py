@@ -294,7 +294,7 @@ class TencentProvider(BaseDNSProvider):
         if not value_changed and not ttl_changed and not comment_changed:
             return UpstreamResult(
                 success=True,
-                action="nochange",
+                action="unchanged",
                 message=f"DNS record unchanged for {existing.raw.get('name', '')}",
                 record_id=existing.record_id,
                 zone_id=None,
