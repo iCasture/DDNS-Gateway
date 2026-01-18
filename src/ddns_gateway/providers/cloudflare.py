@@ -334,7 +334,7 @@ class CloudFlareProvider(BaseDNSProvider):
         ):
             return UpstreamResult(
                 success=True,
-                action="nochange",
+                action="unchanged",
                 message=f"DNS record unchanged for {existing.raw.get('name', '')}",
                 record_id=existing.record_id,
                 zone_id=existing.zone_id,

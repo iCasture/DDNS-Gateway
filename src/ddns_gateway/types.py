@@ -114,7 +114,7 @@ class UpstreamResult:
     success : bool
         Whether the operation was successful.
     action : str
-        The action taken: "created", "updated", "deleted", or "nochange".
+        The action taken: "created", "updated", "deleted", or "unchanged".
     message : str
         Human-readable message describing the result.
     record_id : str | None

@@ -70,7 +70,7 @@ class CachedResponseBase:
     status : str
         Response status: "success" or "error".
     original_action : str
-        The original action from upstream: "created", "updated", "nochange", "deleted".
+        The original action from upstream: "created", "updated", "unchanged", "deleted".
     provider : str
         Provider name (lowercase).
     zone : str
@@ -99,7 +99,7 @@ class CachedResponseBase:
 
     # Response status
     status: str  # "success" | "error"
-    original_action: str  # "created" | "updated" | "nochange" | "deleted"
+    original_action: str  # "created" | "updated" | "unchanged" | "deleted"
 
     # Record identity
     provider: str
@@ -768,8 +768,8 @@ def build_deduped_response(
 
     # Add DEDUPE_HIT_SHORTCIRCUIT warning to indicate cache hit
     # This allows RouterOS scripts to distinguish between "no upstream call"
-    # (deduped) and "upstream called but no change" (nochange).
-    # Both the action field (action="deduped" vs action="nochange") and this
+    # (deduped) and "upstream called but no change" (unchanged).
+    # Both the action field (action="deduped" vs action="unchanged") and this
     # warning code can be used for machine-readable detection.
     # Convert all warnings to dict format for consistency
     warnings_list: list[dict] = []
@@ -846,7 +846,7 @@ def create_cached_base(
     status : str
         "success" or "error"
     action : str
-        The original action: "created", "updated", "nochange", "deleted"
+        The original action: "created", "updated", "unchanged", "deleted"
     provider : str
         Provider name (lowercase)
     zone : str
