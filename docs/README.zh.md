@@ -118,7 +118,7 @@ host = "0.0.0.0"     # 监听地址. 如使用 Nginx 反代, 将此处设置为 
 port = 38080         # 监听端口
 
 [auth]
-enabled = false      # 是否启用身份验证. 若启用, 则请求时必须附带有效的 Token. 未附带 Token 或 Token 无效时, 将返回 401 / 403 错误
+enabled = false      # 是否启用身份验证. 若启用, 则请求时必须附带有效的 Token. 未附带 Token 或 Token 无效时, 将返回 401 错误
 tokens = []          # 若启用身份验证, 必须在此处配置有效的 Token 列表. 若且启用了验证而此列表为空, 则所有请求都会被拒绝
 
 [methods]
@@ -413,7 +413,7 @@ curl "http://localhost:38080/health"
 }
 ```
 
-当发生服务端 Server Token 认证失败 (401 / 403) 或请求方法被禁用 (405) 时，API 将返回 JSON 格式的错误信息。例如：
+当发生服务端 Server Token 认证失败 (401) 或请求方法被禁用 (405) 时，API 将返回 JSON 格式的错误信息。例如：
 
 - Missing Token (401):
 
@@ -425,12 +425,12 @@ curl "http://localhost:38080/health"
     }
     ```
 
-- Invalid Token (403):
+- Invalid Token (401):
 
     ```json
     {
     "status": "error",
-    "code": 403,
+    "code": 401,
     "message": "Invalid authentication token"
     }
     ```
@@ -765,7 +765,7 @@ level = "DEBUG"
 
        - Fail2Ban
 
-            如果开启了文件日志，可以使用 Fail2Ban 监控日志文件，一旦发现大量 401 (Unauthorized) 或 403 (Forbidden) 错误，自动在防火墙层面封锁对应 IP。
+            如果开启了文件日志，可以使用 Fail2Ban 监控日志文件，一旦发现大量 401 (Unauthorized) 错误，自动在防火墙层面封锁对应 IP。
 
 2. **本项目大部分源代码由 AI 生成**，包括但不限于功能实现、代码结构以及部分文档内容。
 

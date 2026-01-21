@@ -29,6 +29,7 @@ from ddns_gateway.dedupe import DedupeCache
 from ddns_gateway.models import (
     ERROR_STATUS_MAP,
     DDNSResponse,
+    DebugInfo,
     DNSProvider,
     ErrorCode,
     ErrorModel,
@@ -124,7 +125,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Validate token
         if not server_token:
             return JSONResponse(
-                status_code=st_status.HTTP_401_UNAUTHORIZED,
+                status_code=ERROR_STATUS_MAP.get(
+                    ErrorCode.MISSING_AUTH_TOKEN,
+                    st_status.HTTP_401_UNAUTHORIZED,
+                ),
                 content=DDNSResponse.error(
                     errors=ErrorModel(
                         code=ErrorCode.MISSING_AUTH_TOKEN,
@@ -138,7 +142,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         if server_token not in config.auth.tokens:
             return JSONResponse(
-                status_code=st_status.HTTP_403_FORBIDDEN,
+                status_code=ERROR_STATUS_MAP.get(
+                    ErrorCode.INVALID_AUTH_TOKEN,
+                    st_status.HTTP_403_FORBIDDEN,
+                ),
                 content=DDNSResponse.error(
                     errors=ErrorModel(
                         code=ErrorCode.INVALID_AUTH_TOKEN,
@@ -419,50 +426,90 @@ def create_app(config: Config) -> FastAPI:
 # =============================================================================
 
 
-async def http_exception_handler(_request: Request, exc: Exception) -> Response:
+def _should_include_debug_info(request: Request) -> bool:
+    """
+    Safely get ``include_debug_info`` from ``app.state.config``.
+
+    Returns ``False`` if config is not available (e.g., during startup errors).
+    """
+    try:
+        config: Config = request.app.state.config
+    except AttributeError:
+        return False
+    return config.response.include_debug_info
+
+
+async def http_exception_handler(request: Request, exc: Exception) -> Response:
     """
     Handle HTTP exceptions with consistent JSON responses.
 
     Convert FastAPI's default {"detail": "..."} format to the unified
-    API response format.
+    API response format. Internal details are hidden from the response
+    and only included in debug info when enabled.
     """
     # Type narrowing for the actual exception type
     http_exc = exc if isinstance(exc, HTTPException) else HTTPException(500, str(exc))
+
+    # Hide internal details from user-facing message
+    is_server_error = (
+        st_status.HTTP_500_INTERNAL_SERVER_ERROR
+        <= http_exc.status_code
+        < st_status.HTTP_500_INTERNAL_SERVER_ERROR + 100
+    )
+    user_message = "Server error" if is_server_error else "Request error"
+
+    include_debug = _should_include_debug_info(request)
+
     return JSONResponse(
         status_code=http_exc.status_code,
         content=DDNSResponse.error(
             errors=ErrorModel(
                 code=ErrorCode.INTERNAL_ERROR,
-                message=str(http_exc.detail),
+                message=user_message,
             ),
             provider="unknown",
             zone="",
             record_type="",
             record_name="",
+            include_debug_info=include_debug,
+            raw_input={},
+            extra={
+                "original_status_code": http_exc.status_code,
+                "original_detail": str(http_exc.detail),
+            },
         ).model_dump(exclude_none=True),
     )
 
 
-async def validation_exception_handler(_request: Request, exc: Exception) -> Response:
+async def validation_exception_handler(request: Request, exc: Exception) -> Response:
     """
     Handle validation errors with consistent JSON responses.
 
     Convert FastAPI's validation error format to the unified API response format,
-    listing all missing or invalid fields in the message.
+    listing all missing or invalid fields in the message. Internal details are
+    hidden from the response and only included in debug info when enabled.
     """
+    include_debug = _should_include_debug_info(request)
+
     # Type narrowing for the actual exception type
     if not isinstance(exc, RequestValidationError):
         return JSONResponse(
-            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=ERROR_STATUS_MAP.get(
+                ErrorCode.INTERNAL_ERROR,
+                st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
             content=DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.INTERNAL_ERROR,
-                    message=str(exc),
+                    message="Internal server error",
                 ),
                 provider="unknown",
                 zone="",
                 record_type="",
                 record_name="",
+                include_debug_info=include_debug,
+                raw_input={},
+                extra={"original_exception": str(exc)},
             ).model_dump(exclude_none=True),
         )
 
@@ -475,21 +522,24 @@ async def validation_exception_handler(_request: Request, exc: Exception) -> Res
             str(loc) for loc in error["loc"] if loc not in {"query", "body"}
         )
         if error["type"] == "missing":
-            missing_fields.append(field_path)
+            missing_fields.append(f"'{field_path}'")
         else:
-            invalid_fields.append(f"{field_path}: {error['msg']}")
+            invalid_fields.append(f"'{field_path}': {error['msg']}")
 
     # Build message
     messages: list[str] = []
     if missing_fields:
-        messages.append(f"Missing required fields: {', '.join(missing_fields)}")
+        messages.append(f"Missing required fields: {', '.join(missing_fields)}.")
     if invalid_fields:
-        messages.append(f"Invalid fields: {'; '.join(invalid_fields)}")
+        messages.append(f"Invalid fields: {'; '.join(invalid_fields)}.")
 
     message = ". ".join(messages) if messages else "Validation error"
 
     return JSONResponse(
-        status_code=st_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=ERROR_STATUS_MAP.get(
+            ErrorCode.VALIDATION_ERROR,
+            st_status.HTTP_400_BAD_REQUEST,
+        ),
         content=DDNSResponse.error(
             errors=ErrorModel(
                 code=ErrorCode.VALIDATION_ERROR,
@@ -503,7 +553,7 @@ async def validation_exception_handler(_request: Request, exc: Exception) -> Res
     )
 
 
-async def generic_exception_handler(_request: Request, exc: Exception) -> Response:
+async def generic_exception_handler(request: Request, exc: Exception) -> Response:
     """
     Handle uncaught exceptions with consistent JSON responses.
 
@@ -517,7 +567,7 @@ async def generic_exception_handler(_request: Request, exc: Exception) -> Respon
 
     Parameters
     ----------
-    _request : Request
+    request : Request
         The FastAPI request object.
     exc : Exception
         The uncaught exception.
@@ -531,9 +581,26 @@ async def generic_exception_handler(_request: Request, exc: Exception) -> Respon
     -----
     This handler uses direct DDNSResponse construction (not the factory method)
     to avoid potential infinite recursion if the factory methods themselves
-    are the source of the error.
+    are the source of the error. Internal details are hidden from the response
+    and only included in debug info when enabled.
     """
     logger.exception('Unhandled exception: "%s".', exc)
+
+    include_debug = _should_include_debug_info(request)
+
+    # Build debug info if enabled
+    # IMPORTANT: Use direct DebugInfo construction here, NOT through factory method
+    # to avoid potential infinite recursion if the factory method itself
+    # is the source of the exception
+    debug_info: DebugInfo | None = None
+    if include_debug:
+        debug_info = DebugInfo(
+            raw_input={},
+            extra={
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            },
+        )
 
     # IMPORTANT: Use direct construction here, NOT DDNSResponse.error()
     # This avoids potential infinite recursion if the factory method itself
@@ -553,7 +620,7 @@ async def generic_exception_handler(_request: Request, exc: Exception) -> Respon
             ),
         ],
         meta=ResponseMeta(),
-        debug=None,
+        debug=debug_info,
     )
 
     return JSONResponse(
@@ -624,7 +691,10 @@ async def upsert_ddns_record(
         provider_enum = DNSProvider(provider_lower)
     except ValueError:
         return JSONResponse(
-            status_code=st_status.HTTP_400_BAD_REQUEST,
+            status_code=ERROR_STATUS_MAP.get(
+                ErrorCode.INVALID_PROVIDER,
+                st_status.HTTP_400_BAD_REQUEST,
+            ),
             content=DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.INVALID_PROVIDER,
@@ -645,16 +715,27 @@ async def upsert_ddns_record(
     provider_instance = _providers.get(provider_enum)
     if provider_instance is None:
         return JSONResponse(
-            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=ERROR_STATUS_MAP.get(
+                ErrorCode.INTERNAL_ERROR,
+                st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
             content=DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.INTERNAL_ERROR,
-                    message=f"Provider {provider} not initialized",
+                    message="Internal server error",
                 ),
                 provider=provider_lower,
                 zone=zone,
                 record_type=record_type.upper(),
                 record_name=record,
+                include_debug_info=config.response.include_debug_info,
+                raw_input={
+                    "provider": provider,
+                    "zone": zone,
+                    "record_type": record_type,
+                    "record": record,
+                },
+                extra={"reason": f"Provider {provider} not initialized"},
             ).model_dump(exclude_none=True),
         )
 
@@ -702,22 +783,39 @@ async def upsert_ddns_record(
         final_proxied = proxied
 
     # Validate value
+    # if not final_value:
+    #     return JSONResponse(
+    #         status_code=ERROR_STATUS_MAP.get(
+    #             ErrorCode.VALIDATION_ERROR,
+    #             st_status.HTTP_400_BAD_REQUEST,
+    #         ),
+    #         content=DDNSResponse.error(
+    #             errors=ErrorModel(
+    #                 code=ErrorCode.VALIDATION_ERROR,
+    #                 message="Missing required field: value",
+    #                 field="value",
+    #             ),
+    #             provider=provider_lower,
+    #             zone=zone,
+    #             record_type=record_type.upper(),
+    #             record_name=record,
+    #             warnings=api_warnings,
+    #         ).model_dump(exclude_none=True),
+    #     )
+
+    # Validate value - raise RequestValidationError to unify error handling
     if not final_value:
-        return JSONResponse(
-            status_code=st_status.HTTP_400_BAD_REQUEST,
-            content=DDNSResponse.error(
-                errors=ErrorModel(
-                    code=ErrorCode.VALIDATION_ERROR,
-                    message="Missing required field: value",
-                    field="value",
-                ),
-                provider=provider_lower,
-                zone=zone,
-                record_type=record_type.upper(),
-                record_name=record,
-                warnings=api_warnings,
-            ).model_dump(exclude_none=True),
-        )
+        error_location = "body" if body is not None else "query"
+
+        errors = [
+            {
+                "loc": (error_location, "value"),
+                "msg": "Missing required field: 'value'.",
+                "type": "missing",
+            },
+        ]
+
+        raise RequestValidationError(errors=errors)
 
     # Extract credentials
     credentials = extract_credentials_from_header(provider_enum, request)
@@ -816,7 +914,10 @@ async def delete_ddns_record(
         provider_enum = DNSProvider(provider_lower)
     except ValueError:
         return JSONResponse(
-            status_code=st_status.HTTP_400_BAD_REQUEST,
+            status_code=ERROR_STATUS_MAP.get(
+                ErrorCode.INVALID_PROVIDER,
+                st_status.HTTP_400_BAD_REQUEST,
+            ),
             content=DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.INVALID_PROVIDER,
@@ -837,16 +938,27 @@ async def delete_ddns_record(
     provider_instance = _providers.get(provider_enum)
     if provider_instance is None:
         return JSONResponse(
-            status_code=st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=ERROR_STATUS_MAP.get(
+                ErrorCode.INTERNAL_ERROR,
+                st_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
             content=DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.INTERNAL_ERROR,
-                    message=f"Provider {provider} not initialized",
+                    message="Internal server error",
                 ),
                 provider=provider_lower,
                 zone=zone,
                 record_type=record_type.upper(),
                 record_name=record,
+                include_debug_info=config.response.include_debug_info,
+                raw_input={
+                    "provider": provider,
+                    "zone": zone,
+                    "record_type": record_type,
+                    "record": record,
+                },
+                extra={"reason": f"Provider {provider} not initialized"},
             ).model_dump(exclude_none=True),
         )
 

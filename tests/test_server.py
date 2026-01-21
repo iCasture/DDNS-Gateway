@@ -29,15 +29,15 @@ class TestAuthMiddleware:
         assert data["status"] == "error"
         assert any(e["code"] == "MISSING_AUTH_TOKEN" for e in data["errors"])
 
-    def test_invalid_token_returns_403(self, client_auth_enabled):
-        """Test that invalid Bearer token returns 403."""
+    def test_invalid_token_returns_401(self, client_auth_enabled):
+        """Test that invalid Bearer token returns 401."""
         response = client_auth_enabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={"value": "1.2.3.4"},
             headers={"Authorization": "Bearer invalid-token"},
         )
 
-        assert response.status_code == st_status.HTTP_403_FORBIDDEN
+        assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
         data = response.json()
         assert data["status"] == "error"
         assert any(e["code"] == "INVALID_AUTH_TOKEN" for e in data["errors"])
@@ -90,44 +90,76 @@ class TestValidationErrorHandler:
     def test_missing_value_returns_400(self, client_auth_disabled):
         """Test that missing value parameter returns 400."""
         # PUT without value in body or query
-        response = client_auth_disabled.put("/v1/ddns/cloudflare/example.com/A/home")
+        response_1 = client_auth_disabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home?ttl=600",
+        )
+        response_2 = client_auth_disabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+            json={"ttl": 600},
+        )
 
-        assert response.status_code == st_status.HTTP_400_BAD_REQUEST
-        data = response.json()
-        assert data["status"] == "error"
-        assert any("value" in e.get("field", "") for e in data["errors"])
+        assert response_1.status_code == st_status.HTTP_400_BAD_REQUEST
+        assert response_2.status_code == st_status.HTTP_400_BAD_REQUEST
+        data_1 = response_1.json()
+        data_2 = response_2.json()
+        assert data_1["status"] == "error"
+        assert data_2["status"] == "error"
+        assert any(
+            "Missing required fields: 'value'." in e.get("message", "")
+            for e in data_1["errors"]
+        )
+        assert any(
+            "Missing required fields: 'value'." in e.get("message", "")
+            for e in data_2["errors"]
+        )
 
     def test_invalid_provider_returns_400(self, client_auth_disabled):
         """Test that invalid provider returns 400."""
-        response = client_auth_disabled.put(
+        response_1 = client_auth_disabled.put(
+            "/v1/ddns/invalid_provider/example.com/A/home?value=1.2.3.4",
+        )
+        response_2 = client_auth_disabled.put(
             "/v1/ddns/invalid_provider/example.com/A/home",
             json={"value": "1.2.3.4"},
         )
 
-        assert response.status_code == st_status.HTTP_400_BAD_REQUEST
-        data = response.json()
-        assert data["status"] == "error"
-        assert any(e["code"] == "INVALID_PROVIDER" for e in data["errors"])
+        assert response_1.status_code == st_status.HTTP_400_BAD_REQUEST
+        assert response_2.status_code == st_status.HTTP_400_BAD_REQUEST
+        data_1 = response_1.json()
+        data_2 = response_2.json()
+        assert data_1["status"] == "error"
+        assert data_2["status"] == "error"
+        assert any(e["code"] == "INVALID_PROVIDER" for e in data_1["errors"])
+        assert any(e["code"] == "INVALID_PROVIDER" for e in data_2["errors"])
 
-    def test_missing_body_params_returns_422(self, client_auth_disabled):
-        """Test that missing parameters returns 422 with clear message."""
+    def test_missing_body_params_returns_400(self, client_auth_disabled):
+        """Test that missing parameters returns 400 with clear message."""
         # Send empty body - but body is optional, so it falls back to query.
-        # To trigger 422, we need to send a body that is invalid (e.g. strict type check)
+        # To trigger 400, we need to send a body that is invalid (e.g. strict type check)
         # OR force body parsing.
         # But UpsertRequest fields are defaults or None... wait.
         # UpsertRequest: value is required.
         # If we send json={}, value is missing.
-        response = client_auth_disabled.put(
+        response_1 = client_auth_disabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home",
+        )
+        response_2 = client_auth_disabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={},  # Empty body, should fail Pydantic validation for 'value'
         )
 
-        assert response.status_code == st_status.HTTP_422_UNPROCESSABLE_CONTENT
-        data = response.json()
-        assert data["status"] == "error"
-        assert len(data["errors"]) == 1
-        assert data["errors"][0]["code"] == "VALIDATION_ERROR"
-        assert "Missing required fields: value" in data["errors"][0]["message"]
+        assert response_1.status_code == st_status.HTTP_400_BAD_REQUEST
+        assert response_2.status_code == st_status.HTTP_400_BAD_REQUEST
+        data_1 = response_1.json()
+        data_2 = response_2.json()
+        assert data_1["status"] == "error"
+        assert data_2["status"] == "error"
+        assert len(data_1["errors"]) == 1
+        assert len(data_2["errors"]) == 1
+        assert data_1["errors"][0]["code"] == "VALIDATION_ERROR"
+        assert data_2["errors"][0]["code"] == "VALIDATION_ERROR"
+        assert "Missing required fields: 'value'." in data_1["errors"][0]["message"]
+        assert "Missing required fields: 'value'." in data_2["errors"][0]["message"]
 
     def test_partial_body_params_correctly_lists_missing(self, client_auth_disabled):
         """Test that partial parameters correctly lists only missing ones."""
@@ -142,16 +174,26 @@ class TestValidationErrorHandler:
         # However, the user asked for "lists only missing ones".
         # If I had more required fields, this would be relevant.
         # I'll stick to testing the message format.
-        response = client_auth_disabled.put(
+        response_1 = client_auth_disabled.put(
+            "/v1/ddns/cloudflare/example.com/A/home?ttl=600",
+        )
+        response_2 = client_auth_disabled.put(
             "/v1/ddns/cloudflare/example.com/A/home",
             json={},
         )
-        assert response.status_code == st_status.HTTP_422_UNPROCESSABLE_CONTENT
-        data = response.json()
-        msg = data["errors"][0]["message"]
-        assert "Missing required fields: value" in msg
-        assert "ttl" not in msg  # Optional
-        assert "comment" not in msg  # Optional
+
+        assert response_1.status_code == st_status.HTTP_400_BAD_REQUEST
+        assert response_2.status_code == st_status.HTTP_400_BAD_REQUEST
+        data_1 = response_1.json()
+        data_2 = response_2.json()
+        msg_1 = data_1["errors"][0]["message"]
+        msg_2 = data_2["errors"][0]["message"]
+        assert "Missing required fields: 'value'." in msg_1
+        assert "Missing required fields: 'value'." in msg_2
+        assert "ttl" not in msg_1  # Optional
+        assert "ttl" not in msg_2  # Optional
+        assert "comment" not in msg_1  # Optional
+        assert "comment" not in msg_2  # Optional
 
 
 class TestDeleteEndpoint:
