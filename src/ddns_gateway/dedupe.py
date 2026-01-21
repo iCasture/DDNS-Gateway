@@ -13,7 +13,7 @@ CRITICAL: Never modify nested objects from the cached base directly.
 If you need to modify a nested field, you MUST copy that specific subtree first.
 Violating this will pollute the cache and cause unpredictable behavior.
 
-Safe pattern::
+Safe patterns:
 
     # OK: Override top-level keys, don't modify nested objects
     resp = {**base_dict, "action": "deduped", "meta": new_meta}
@@ -494,6 +494,26 @@ class DedupeCache:
         # Notify waiters AFTER releasing lock (they'll get None)
         if event_to_set is not None:
             event_to_set.set()
+
+    async def get_in_flight_age(self, key_hash: str) -> float | None:
+        """
+        Get the age of an in-flight request in seconds.
+
+        Parameters
+        ----------
+        key_hash : str
+            The dedupe key hash.
+
+        Returns
+        -------
+        float | None
+            The age in seconds if the entry exists and is in-flight, None otherwise.
+        """
+        async with self._lock:
+            entry = self._entries.get(key_hash)
+            if entry and entry.in_flight and entry.in_flight_started_at:
+                return time.time() - entry.in_flight_started_at
+            return None
 
     async def wait_for_result(
         self,

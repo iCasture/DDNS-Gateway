@@ -383,6 +383,27 @@ class DedupeInfo(BaseModel):
     window_sec: int
 
 
+class SingleflightInfo(BaseModel):
+    """
+    Singleflight status information.
+
+    Included in meta when a singleflight wait timeout occurs.
+
+    Attributes
+    ----------
+    in_flight : bool
+        Whether another request is currently in progress.
+    in_flight_age_sec : float
+        How long the in-flight request has been running (seconds).
+    retry_after_sec : float
+        Suggested time to wait before retrying (seconds).
+    """
+
+    in_flight: bool
+    in_flight_age_sec: float
+    retry_after_sec: float
+
+
 class ResponseMeta(BaseModel):
     """
     Response metadata containing request tracking and deduplication info.
@@ -395,6 +416,8 @@ class ResponseMeta(BaseModel):
         ISO 8601 timestamp of the response.
     dedupe : DedupeInfo | None
         Deduplication information (if dedupe is enabled).
+    singleflight : SingleflightInfo | None
+        Singleflight status information (if singleflight wait timeout occurs).
     """
 
     request_id: str = Field(default_factory=lambda: str(uuid4()))
@@ -402,6 +425,7 @@ class ResponseMeta(BaseModel):
         default_factory=lambda: datetime.now(UTC).isoformat(),
     )
     dedupe: DedupeInfo | None = None
+    singleflight: SingleflightInfo | None = None
 
 
 class DebugInfo(BaseModel):
