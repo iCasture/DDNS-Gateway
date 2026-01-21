@@ -19,22 +19,17 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ddns_gateway.dedupe import (
-    build_deduped_response,
+    build_dedupe_response_dict,
     compute_dedupe_key,
     create_cached_base,
 )
 from ddns_gateway.models import (
     DDNSResponse,
-    DebugInfo,
-    DedupeInfo,
     DNSProvider,
     EffectiveValues,
     ErrorCode,
     ErrorModel,
-    RecordInfo,
     RecordType,
-    ResponseMeta,
-    ResultInfo,
     UpstreamInfo,
     WarningCode,
     WarningModel,
@@ -65,7 +60,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-def _build_debug_dict(
+def _build_debug_payload(
     *,
     zone: str,
     record: str,
@@ -76,7 +71,7 @@ def _build_debug_dict(
     proxied: bool | None = None,
 ) -> dict[str, Any]:
     """
-    Build a dictionary for debug info (raw_input or normalized).
+    Build a payload dictionary for debug info (raw_input or normalized).
 
     Only includes optional fields if they are not None.
 
@@ -116,93 +111,6 @@ def _build_debug_dict(
     if proxied is not None:
         result["proxied"] = proxied
     return result
-
-
-def _build_deduped_response(
-    resp_dict: dict[str, Any],
-    window_seconds: int,
-    *,
-    extra_warnings: list[WarningModel] | None = None,
-    include_debug_info: bool = False,
-    raw_input: dict[str, Any] | None = None,
-    normalized: dict[str, Any] | None = None,
-    extra: dict[str, Any] | None = None,
-) -> DDNSResponse:
-    """
-    Build DDNSResponse from a deduped response dictionary.
-
-    Parameters
-    ----------
-    resp_dict : dict[str, Any]
-        The response dictionary from ``build_deduped_response``.
-    window_seconds : int
-        The dedupe window used for meta.dedupe.window_sec.
-    extra_warnings : list[WarningModel] | None
-        Additional warnings to append (e.g., 'proxied' validation warnings).
-    include_debug_info : bool
-        Whether to include debug information in the response.
-    raw_input : dict[str, Any] | None
-        Raw input dictionary for debug info.
-    normalized : dict[str, Any] | None
-        Normalized dictionary for debug info.
-    extra : dict[str, Any] | None
-        Additional custom debug information for troubleshooting.
-
-    Returns
-    -------
-    DDNSResponse
-        The deduped response.
-    """
-    result: ResultInfo | None = None
-    if resp_dict.get("result"):
-        upstream = None
-        if resp_dict["result"].get("upstream"):
-            upstream = UpstreamInfo(**resp_dict["result"]["upstream"])
-        result = ResultInfo(
-            effective=EffectiveValues(**resp_dict["result"]["effective"]),
-            upstream=upstream,
-            previous_value=resp_dict["result"].get("previous_value"),
-        )
-
-    debug: DebugInfo | None = None
-    if include_debug_info and raw_input is not None:
-        debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
-
-    # Convert warnings to WarningModel objects (they may be dicts from build_deduped_response)
-    warnings_list: list[WarningModel] = []
-    for w in resp_dict.get("warnings", []):
-        if isinstance(w, WarningModel):
-            warnings_list.append(w)
-        elif isinstance(w, dict):
-            warnings_list.append(WarningModel(**w))
-        else:
-            # Fallback: try to construct from whatever we have
-            warnings_list.append(
-                WarningModel(**w)
-                if hasattr(w, "__dict__")
-                else WarningModel(code=str(w), message=str(w)),
-            )
-
-    if extra_warnings:
-        warnings_list.extend(extra_warnings)
-
-    return DDNSResponse(
-        status=resp_dict["status"],
-        action=resp_dict["action"],
-        upstream_called=resp_dict["upstream_called"],
-        provider=resp_dict["provider"],
-        record=RecordInfo(**resp_dict["record"]),
-        result=result,
-        warnings=warnings_list,
-        errors=resp_dict["errors"],
-        meta=ResponseMeta(
-            dedupe=DedupeInfo(
-                hit=True,
-                window_sec=window_seconds,
-            ),
-        ),
-        debug=debug,
-    )
 
 
 # =============================================================================
@@ -281,7 +189,7 @@ async def upsert_record_service(
     warnings: list[WarningModel] = []
 
     # Build raw input for debug (before normalization)
-    raw_input = _build_debug_dict(
+    raw_input = _build_debug_payload(
         zone=zone,
         record=record,
         record_type=record_type,
@@ -384,7 +292,7 @@ async def upsert_record_service(
             proxied_validated = None
 
     # Build normalized for debug (after successful normalization)
-    normalized = _build_debug_dict(
+    normalized = _build_debug_payload(
         zone=norm_zone,
         record=norm_record,
         record_type=record_type_enum.value,
@@ -418,8 +326,10 @@ async def upsert_record_service(
                 dedupe_key[:16],
             )
             # Build response from cache
-            resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
-            return _build_deduped_response(
+            resp_dict = build_dedupe_response_dict(
+                cached, dedupe_cache.window_seconds
+            )
+            return DDNSResponse.from_dedupe_dict(
                 resp_dict,
                 dedupe_cache.window_seconds,
                 extra_warnings=warnings,
@@ -451,11 +361,11 @@ async def upsert_record_service(
             )
             if sf_result is not None and sf_result.base is not None:
                 # Leader completed, use their result
-                resp_dict = build_deduped_response(
+                resp_dict = build_dedupe_response_dict(
                     sf_result,
                     dedupe_cache.window_seconds,
                 )
-                return _build_deduped_response(
+                return DDNSResponse.from_dedupe_dict(
                     resp_dict,
                     dedupe_cache.window_seconds,
                     extra_warnings=warnings,
@@ -861,7 +771,7 @@ async def delete_record_service(
     """
     warnings: list[WarningModel] = []
     # Build raw input for debug (before normalization)
-    raw_input = _build_debug_dict(
+    raw_input = _build_debug_payload(
         zone=zone,
         record=record,
         record_type=record_type,
@@ -928,7 +838,7 @@ async def delete_record_service(
         )
 
     # Build normalized for debug (after successful normalization)
-    normalized = _build_debug_dict(
+    normalized = _build_debug_payload(
         zone=norm_zone,
         record=norm_record,
         record_type=record_type_enum.value,
@@ -957,8 +867,10 @@ async def delete_record_service(
                 '[delete] Dedupe hit: "%s" ...',
                 dedupe_key[:16],
             )
-            resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
-            return _build_deduped_response(
+            resp_dict = build_dedupe_response_dict(
+                cached, dedupe_cache.window_seconds
+            )
+            return DDNSResponse.from_dedupe_dict(
                 resp_dict,
                 dedupe_cache.window_seconds,
                 include_debug_info=include_debug_info,
@@ -989,11 +901,11 @@ async def delete_record_service(
             )
             if sf_result is not None and sf_result.base is not None:
                 # Leader completed, use their result
-                resp_dict = build_deduped_response(
+                resp_dict = build_dedupe_response_dict(
                     sf_result,
                     dedupe_cache.window_seconds,
                 )
-                return _build_deduped_response(
+                return DDNSResponse.from_dedupe_dict(
                     resp_dict,
                     dedupe_cache.window_seconds,
                     include_debug_info=include_debug_info,

@@ -1062,6 +1062,94 @@ class DDNSResponse(BaseModel):
             debug=_debug,
         )
 
+    @classmethod
+    def from_dedupe_dict(
+        cls,
+        resp_dict: dict[str, Any],
+        window_seconds: int,
+        *,
+        extra_warnings: list[WarningModel] | None = None,
+        include_debug_info: bool = False,
+        raw_input: dict[str, Any] | None = None,
+        normalized: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> Self:
+        """
+        Create a response from a dedupe cache hit dictionary.
+
+        Parameters
+        ----------
+        resp_dict : dict[str, Any]
+            Response dictionary produced by ``build_dedupe_response_dict``.
+        window_seconds : int
+            The dedupe window used for meta.dedupe.window_sec.
+        extra_warnings : list[WarningModel] | None, optional
+            Additional warnings to append (e.g., validation warnings).
+        include_debug_info : bool, optional
+            Whether to include debug information in the response.
+        raw_input : dict[str, Any] | None, optional
+            Raw input dictionary for debug info.
+        normalized : dict[str, Any] | None, optional
+            Normalized dictionary for debug info.
+        extra : dict[str, Any] | None, optional
+            Additional custom debug information for troubleshooting.
+
+        Returns
+        -------
+        DDNSResponse
+            The deduped response.
+        """
+        result: ResultInfo | None = None
+        if resp_dict.get("result"):
+            upstream = None
+            if resp_dict["result"].get("upstream"):
+                upstream = UpstreamInfo(**resp_dict["result"]["upstream"])
+            result = ResultInfo(
+                effective=EffectiveValues(**resp_dict["result"]["effective"]),
+                upstream=upstream,
+                previous_value=resp_dict["result"].get("previous_value"),
+            )
+
+        debug: DebugInfo | None = None
+        if include_debug_info and raw_input is not None:
+            debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
+
+        # Convert warnings to WarningModel objects (they may be dicts from dedupe cache)
+        warnings_list: list[WarningModel] = []
+        for w in resp_dict.get("warnings", []):
+            if isinstance(w, WarningModel):
+                warnings_list.append(w)
+            elif isinstance(w, dict):
+                warnings_list.append(WarningModel(**w))
+            else:
+                # Fallback: try to construct from whatever we have
+                warnings_list.append(
+                    WarningModel(**w.__dict__)
+                    if hasattr(w, "__dict__")
+                    else WarningModel(code=str(w), message=str(w)),
+                )
+
+        if extra_warnings:
+            warnings_list.extend(extra_warnings)
+
+        return cls(
+            status=resp_dict["status"],
+            action=resp_dict["action"],
+            upstream_called=resp_dict["upstream_called"],
+            provider=resp_dict["provider"],
+            record=RecordInfo(**resp_dict["record"]),
+            result=result,
+            warnings=warnings_list,
+            errors=resp_dict["errors"],
+            meta=ResponseMeta(
+                dedupe=DedupeInfo(
+                    hit=True,
+                    window_sec=window_seconds,
+                ),
+            ),
+            debug=debug,
+        )
+
     def to_plain_text(self) -> str:
         """
         Convert response to plain text format for RouterOS compatibility.

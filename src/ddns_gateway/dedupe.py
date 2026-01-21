@@ -693,12 +693,12 @@ def compute_dedupe_key(
     return hashlib.sha256(canonical_json.encode()).hexdigest()
 
 
-def build_deduped_response(
+def build_dedupe_response_dict(
     entry: DedupeEntry,
     window_seconds: int,
 ) -> dict:
     """
-    Build a response dict for dedupe cache hit.
+    Build a dedupe response dictionary for cache hit.
 
     Creates a new response dict from the cached base, overriding:
     - action -> "deduped"
@@ -721,7 +721,8 @@ def build_deduped_response(
     -------
     dict
         Response dict suitable for converting to DDNSResponse.
-        The caller should construct DDNSResponse from this.
+        The caller should construct DDNSResponse from this, for example
+        via ``DDNSResponse.from_dedupe_dict``.
     """
     base = entry.base
     if base is None:
