@@ -198,10 +198,10 @@ ERROR_STATUS_MAP: dict[str, int] = {
     ErrorCode.INVALID_IP_ADDRESS: st_status.HTTP_400_BAD_REQUEST,
     ErrorCode.INVALID_DOMAIN_FORMAT: st_status.HTTP_400_BAD_REQUEST,
     ErrorCode.TXT_VALUE_TOO_LONG: st_status.HTTP_400_BAD_REQUEST,
-    # 401 Unauthorized - Missing auth
+    # 401 Unauthorized - Missing/invalid auth
     ErrorCode.MISSING_AUTH_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
-    # 403 Forbidden - Invalid auth
-    ErrorCode.INVALID_AUTH_TOKEN: st_status.HTTP_403_FORBIDDEN,
+    ErrorCode.INVALID_AUTH_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
+    # 403 Forbidden - Missing/invalid upstream credentials
     ErrorCode.MISSING_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
     ErrorCode.INVALID_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
     # 404 Not Found
@@ -850,7 +850,9 @@ class DDNSResponse(BaseModel):
         if include_debug_info:
             _debug = debug
             if _debug is None and raw_input is not None:
-                _debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
+                _debug = DebugInfo(
+                    raw_input=raw_input, normalized=normalized, extra=extra
+                )
 
         return cls(
             status="success",
@@ -1043,7 +1045,9 @@ class DDNSResponse(BaseModel):
         if include_debug_info:
             _debug = debug
             if _debug is None and raw_input is not None:
-                _debug = DebugInfo(raw_input=raw_input, normalized=normalized, extra=extra)
+                _debug = DebugInfo(
+                    raw_input=raw_input, normalized=normalized, extra=extra
+                )
 
         return cls(
             status="error",

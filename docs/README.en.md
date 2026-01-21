@@ -110,7 +110,7 @@ host = "0.0.0.0"     # Listen address. If using Nginx as reverse proxy, set to "
 port = 38080         # Listen port
 
 [auth]
-enabled = false      # Enable authentication. If enabled, requests must include a valid token. Requests without token or with invalid token will return 401 / 403 error.
+enabled = false      # Enable authentication. If enabled, requests must include a valid token. Requests without token or with invalid token will return 401 error.
 tokens = []          # If authentication is enabled, configure valid tokens here. If authentication is enabled and this list is empty, all requests will be rejected.
 
 [methods]
@@ -303,7 +303,7 @@ curl "http://localhost:38080/health"
 }
 ```
 
-When server token authentication fails (401 / 403) or the request method is disabled (405), the API will return a JSON error message. For example:
+When server token authentication fails (401) or the request method is disabled (405), the API will return a JSON error message. For example:
 
 - Missing Token (401):
 
@@ -315,12 +315,12 @@ When server token authentication fails (401 / 403) or the request method is disa
     }
     ```
 
-- Invalid Token (403):
+- Invalid Token (401):
 
     ```json
     {
     "status": "error",
-    "code": 403,
+    "code": 401,
     "message": "Invalid authentication token"
     }
     ```

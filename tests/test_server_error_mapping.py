@@ -43,7 +43,7 @@ class TestErrorResponses:
         [
             (ErrorCode.VALIDATION_ERROR, st_status.HTTP_400_BAD_REQUEST),
             (ErrorCode.MISSING_AUTH_TOKEN, st_status.HTTP_401_UNAUTHORIZED),
-            (ErrorCode.INVALID_AUTH_TOKEN, st_status.HTTP_403_FORBIDDEN),
+            (ErrorCode.INVALID_AUTH_TOKEN, st_status.HTTP_401_UNAUTHORIZED),
             (ErrorCode.ZONE_NOT_FOUND, st_status.HTTP_404_NOT_FOUND),
             (ErrorCode.MULTIPLE_RECORDS_FOUND, st_status.HTTP_409_CONFLICT),
             (ErrorCode.INTERNAL_ERROR, st_status.HTTP_500_INTERNAL_SERVER_ERROR),
