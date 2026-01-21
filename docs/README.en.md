@@ -64,6 +64,8 @@ uv run ddns-gateway --help
 uv run ddns-gateway --config /path/to/config.toml
 uv run ddns-gateway --host 127.0.0.1 --port 9000
 uv run ddns-gateway --log-level DEBUG
+uv run ddns-gateway --response-debug-info
+uv run ddns-gateway -d
 
 # Output logs to file (Note: log rotation must be handled manually)
 uv run ddns-gateway --log-file-enabled --log-file-path "~/log/ddns-gateway.log"
@@ -85,10 +87,11 @@ Detailed parameter description:
 
 | Argument                                      | Function                          | Description                                                                    |
 |:----------------------------------------------|:----------------------------------|:-------------------------------------------------------------------------------|
-| `--config`                                    | Specify config file path          |                                                                                |
-| `--host`                                      | Listen address                    |                                                                                |
-| `--port`                                      | Listen port                       |                                                                                |
-| `--log-level`                                 | Log level                         |                                                                                |
+| `--config`                                    | Specify config file path          | Defaults to `./config.toml` if present                                         |
+| `--host`                                      | Listen address                    | Overrides `server.host`                                                       |
+| `--port`                                      | Listen port                       | Overrides `server.port`                                                       |
+| `--log-level`                                 | Log level                         | Controls logging verbosity only, unrelated to response debug info              |
+| `-d`<br>`--response-debug-info`<br>`-D`<br>`--no-response-debug-info` | Enable/disable response debug info | Overrides `response.include_debug_info`                                  |
 | `--auth-enabled`<br>`--auth-disabled`         | Enable/disable server auth        | Mutually exclusive, cannot be specified together                               |
 | `--auth-tokens`                               | Authentication token list         | Multiple tokens can be space-separated or specified multiple times (see above) |
 | `--methods`                                   | Enabled HTTP methods              | Comma-separated (see above)                                                    |
@@ -124,6 +127,9 @@ file_path = "/var/log/ddns-gateway.log"  # Log file path. Note: ensure proper pe
 
 [health]
 enabled = false                          # Enable "/health" endpoint
+
+[response]
+include_debug_info = false               # Include response debug details (raw input, normalized data)
 ```
 
 The configuration file will be type-checked. If the type is incorrect and cannot be automatically converted, the program will report an error and exit at startup.
@@ -144,6 +150,7 @@ Expected types for each configuration item:
 | `logging.file_enabled` | `bool`        |
 | `logging.file_path`    | `str`         |
 | `health.enabled`       | `bool`        |
+| `response.include_debug_info` | `bool`  |
 
 ## 4. API Reference
 

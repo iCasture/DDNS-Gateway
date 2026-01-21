@@ -483,7 +483,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--config",
         type=Path,
         default=None,
-        help="Path to configuration file (default: config.toml)",
+        help="Path to configuration file (default: ./config.toml if present)",
     )
 
     # Server settings
@@ -492,14 +492,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--host",
         type=str,
         default=None,
-        help="Host address to bind to",
+        help="Server bind host (overrides server.host)",
     )
     parser.add_argument(
         "-p",
         "--port",
         type=int,
         default=None,
-        help="Port number to listen on",
+        help="Server bind port (overrides server.port)",
     )
 
     # Logging
@@ -509,7 +509,34 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default=None,
-        help="Log level",
+        help=(
+            "Logging level for server logs (DEBUG=most verbose; "
+            "unrelated to response debug info)"
+        ),
+    )
+
+    # Response settings
+    response_group = parser.add_mutually_exclusive_group()
+    response_group.add_argument(
+        "-d",
+        "--response-debug-info",
+        dest="response_debug_info",
+        action="store_true",
+        default=None,
+        help=(
+            "Include response debug details "
+            "(overrides response.include_debug_info)"
+        ),
+    )
+    response_group.add_argument(
+        "-D",
+        "--no-response-debug-info",
+        dest="response_debug_info",
+        action="store_false",
+        help=(
+            "Disable response debug details "
+            "(overrides response.include_debug_info)"
+        ),
     )
 
     return parser.parse_args(args)
@@ -573,6 +600,12 @@ def load_config(args: argparse.Namespace | None = None) -> Config:
     # Logging overrides
     if args.log_level is not None:
         cli_overrides.setdefault("logging", {})["level"] = args.log_level
+
+    # Response overrides
+    if args.response_debug_info is not None:
+        cli_overrides.setdefault("response", {})[
+            "include_debug_info"
+        ] = args.response_debug_info
 
     if cli_overrides:
         config_dict = merge_config(config_dict, cli_overrides)
