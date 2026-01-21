@@ -226,6 +226,7 @@ class TestParseArgs:
         assert args.host is None
         assert args.port is None
         assert args.log_level is None
+        assert args.response_debug_info is None
 
     def test_custom_args(self):
         """Test parsing custom arguments."""
@@ -235,6 +236,14 @@ class TestParseArgs:
         assert args.host == "127.0.0.1"
         assert args.port == 9000
         assert args.log_level == "DEBUG"
+
+    def test_response_debug_info_flags(self):
+        """Test response debug info flags."""
+        args = parse_args(["--response-debug-info"])
+        assert args.response_debug_info is True
+
+        args = parse_args(["--no-response-debug-info"])
+        assert args.response_debug_info is False
 
     def test_config_path(self):
         """Test parsing config path with short option."""
@@ -279,6 +288,34 @@ class TestLoadConfigOverrides:
         args = parse_args(["--log-level", "DEBUG"])
         config = load_config(args)
         assert config.logging.level == "DEBUG"
+
+    def test_response_debug_info_override(self):
+        """Test that response debug info CLI arg overrides config."""
+        args = parse_args(["--response-debug-info"])
+        config = load_config(args)
+        assert config.response.include_debug_info is True
+
+    def test_response_debug_info_disable_override(self):
+        """Test that disabling response debug info overrides config."""
+        toml_content = """
+[response]
+include_debug_info = true
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write(toml_content)
+            f.flush()
+            config_path = Path(f.name)
+
+        try:
+            args = parse_args([
+                "--config",
+                str(config_path),
+                "--no-response-debug-info",
+            ])
+            config = load_config(args)
+            assert config.response.include_debug_info is False
+        finally:
+            config_path.unlink()
 
 
 class TestConfigValidation:

@@ -72,6 +72,7 @@ uv run ddns-gateway --help
 uv run ddns-gateway --config /path/to/config.toml
 uv run ddns-gateway --host 127.0.0.1 --port 9000
 uv run ddns-gateway --log-level DEBUG
+uv run ddns-gateway --response-debug-info
 
 # 是否将日志输出到文件 (注意: 需自行处理好日志轮转)
 uv run ddns-gateway --log-file-enabled --log-file-path "~/log/ddns-gateway.log"
@@ -93,10 +94,11 @@ uv run ddns-gateway --methods post        # 仅启用 POST 方法
 
 | 参数                                          | 作用                           | 说明                                                |
 |:----------------------------------------------|:-------------------------------|:----------------------------------------------------|
-| `--config`                                    | 指定配置文件路径               |                                                     |
-| `--host`                                      | 监听地址                       |                                                     |
-| `--port`                                      | 监听端口                       |                                                     |
-| `--log-level`                                 | 日志级别                       |                                                     |
+| `--config`                                    | 指定配置文件路径               | 默认读取 `./config.toml`（存在时）                  |
+| `--host`                                      | 监听地址                       | 覆盖 `server.host`                                  |
+| `--port`                                      | 监听端口                       | 覆盖 `server.port`                                  |
+| `--log-level`                                 | 日志级别                       | 仅影响日志输出，与响应调试信息无关                  |
+| `-d`<br>`--response-debug-info`<br>`-D`<br>`--no-response-debug-info` | 启用 / 禁用响应调试信息 | 覆盖 `response.include_debug_info`                 |
 | `--auth-enabled`<br>`--auth-disabled`         | 启用 / 禁用服务端身份验证      | 两者互斥，不可同时指定                              |
 | `--auth-tokens`                               | 身份验证 Token 列表            | 多个 Token 可用空格分隔，或也可多次指定（见上述）   |
 | `--methods`                                   | `/update` 端点启用的 HTTP 方法 | 使用逗号分隔（见上述），且 GET 与 POST 至少启用一个 |
@@ -132,6 +134,9 @@ file_path = "/var/log/ddns-gateway.log"  # 日志文件路径. 注意: 请确保
 
 [health]
 enabled = false                          # 是否启用 "/health" 端点
+
+[response]
+include_debug_info = false               # 是否在响应中包含调试信息（原始输入、规范化结果）
 ```
 
 配置文件会进行类型校验。若配置值类型不正确且无法自动转换，程序会在启动时报错并退出。
@@ -152,6 +157,7 @@ enabled = false                          # 是否启用 "/health" 端点
 | `logging.file_enabled` | `bool`      |
 | `logging.file_path`    | `str`       |
 | `health.enabled`       | `bool`      |
+| `response.include_debug_info` | `bool`  |
 
 ## 4. API 参考
 
