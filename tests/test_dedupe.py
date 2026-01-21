@@ -598,3 +598,75 @@ class TestComputeDedupeKeyInDedupe:
             proxied=None,
         )
         assert key_upsert != key_delete
+
+
+# =============================================================================
+# get_in_flight_age Tests
+# =============================================================================
+
+
+class TestDedupeCacheInFlightAge:
+    """Tests for get_in_flight_age method."""
+
+    @pytest.mark.asyncio
+    async def test_get_in_flight_age_returns_age(self):
+        """Test that get_in_flight_age returns correct age."""
+        cache = DedupeCache(max_entries=10, window_seconds=60)
+        key = "test_key"
+
+        await cache.mark_in_flight(key, lease_sec=30)
+        await asyncio.sleep(0.1)
+
+        age = await cache.get_in_flight_age(key)
+        assert age is not None
+        assert age >= 0.1
+
+    @pytest.mark.asyncio
+    async def test_get_in_flight_age_returns_none_for_nonexistent(self):
+        """Test that get_in_flight_age returns None for nonexistent key."""
+        cache = DedupeCache(max_entries=10, window_seconds=60)
+
+        age = await cache.get_in_flight_age("nonexistent")
+        assert age is None
+
+    @pytest.mark.asyncio
+    async def test_get_in_flight_age_returns_none_after_completion(self):
+        """Test that get_in_flight_age returns None after in-flight is cleared."""
+        cache = DedupeCache(max_entries=10, window_seconds=60)
+        key = "test_key"
+
+        await cache.mark_in_flight(key, lease_sec=30)
+        await cache.clear_in_flight(key)
+
+        age = await cache.get_in_flight_age(key)
+        assert age is None
+
+    @pytest.mark.asyncio
+    async def test_get_in_flight_age_returns_none_after_set(self):
+        """Test that get_in_flight_age returns None after set() is called."""
+        cache = DedupeCache(max_entries=10, window_seconds=60)
+        key = "test_key"
+
+        await cache.mark_in_flight(key, lease_sec=30)
+
+        # Set a result (simulates leader completing)
+        base = CachedResponseBase(
+            status="success",
+            original_action="created",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            record_id=None,
+            zone_id=None,
+            value="1.2.3.4",
+            ttl=None,
+            comment=None,
+            proxied=None,
+            previous_value=None,
+            warnings=(),
+        )
+        await cache.set(key, base)
+
+        age = await cache.get_in_flight_age(key)
+        assert age is None

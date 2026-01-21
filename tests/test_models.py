@@ -17,6 +17,7 @@ from ddns_gateway.models import (
     RecordType,
     ResponseMeta,
     ResultInfo,
+    SingleflightInfo,
     UpdateRequest,
     UpsertRequest,
     UpstreamInfo,
@@ -341,6 +342,49 @@ class TestResponseMeta:
         assert len(meta.request_id) == 36  # UUID format  # noqa: PLR2004
         assert meta.timestamp is not None
         assert meta.dedupe is None
+        assert meta.singleflight is None
+
+    def test_with_singleflight_info(self):
+        """Test ResponseMeta with singleflight info."""
+        sf_info = SingleflightInfo(
+            in_flight=True,
+            in_flight_age_sec=25.3,
+            retry_after_sec=5.0,
+        )
+        meta = ResponseMeta(singleflight=sf_info)
+        assert meta.singleflight is not None
+        assert meta.singleflight.in_flight is True
+        assert meta.singleflight.in_flight_age_sec == 25.3  # noqa: PLR2004
+        assert meta.singleflight.retry_after_sec == 5.0  # noqa: PLR2004
+
+
+class TestSingleflightInfo:
+    """Tests for SingleflightInfo model."""
+
+    def test_basic_creation(self):
+        """Test creating SingleflightInfo with required fields."""
+        info = SingleflightInfo(
+            in_flight=True,
+            in_flight_age_sec=25.3,
+            retry_after_sec=10.0,
+        )
+        assert info.in_flight is True
+        assert info.in_flight_age_sec == 25.3  # noqa: PLR2004
+        assert info.retry_after_sec == 10.0  # noqa: PLR2004
+
+    def test_serialization(self):
+        """Test SingleflightInfo serialization to dict."""
+        info = SingleflightInfo(
+            in_flight=True,
+            in_flight_age_sec=25.3,
+            retry_after_sec=5.0,
+        )
+        data = info.model_dump()
+        assert data == {
+            "in_flight": True,
+            "in_flight_age_sec": 25.3,
+            "retry_after_sec": 5.0,
+        }
 
 
 class TestDDNSResponseFactoryMethods:

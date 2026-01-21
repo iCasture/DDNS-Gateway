@@ -30,6 +30,8 @@ from ddns_gateway.models import (
     ErrorCode,
     ErrorModel,
     RecordType,
+    ResponseMeta,
+    SingleflightInfo,
     UpstreamInfo,
     WarningCode,
     WarningModel,
@@ -326,9 +328,7 @@ async def upsert_record_service(
                 dedupe_key[:16],
             )
             # Build response from cache
-            resp_dict = build_dedupe_response_dict(
-                cached, dedupe_cache.window_seconds
-            )
+            resp_dict = build_dedupe_response_dict(cached, dedupe_cache.window_seconds)
             return DDNSResponse.from_dedupe_dict(
                 resp_dict,
                 dedupe_cache.window_seconds,
@@ -379,6 +379,43 @@ async def upsert_record_service(
                 '[upsert] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
             )
+
+            # Calculate in_flight_age_sec for singleflight info
+            in_flight_age = await dedupe_cache.get_in_flight_age(dedupe_key)
+
+            # Edge case: Leader may have completed during the race window
+            # between wait_for_result() timeout and get_in_flight_age() call
+            if in_flight_age is None:
+                # Try to get the result one more time
+                cached = await dedupe_cache.get(dedupe_key)
+                if cached is not None:
+                    # Leader completed! Return success instead of timeout error
+                    logger.debug(
+                        '[upsert] Singleflight race: leader completed during timeout handling: "%s" ...',
+                        dedupe_key[:16],
+                    )
+                    resp_dict = build_dedupe_response_dict(
+                        cached,
+                        dedupe_cache.window_seconds,
+                    )
+                    return DDNSResponse.from_dedupe_dict(
+                        resp_dict,
+                        dedupe_cache.window_seconds,
+                        extra_warnings=warnings,
+                        include_debug_info=include_debug_info,
+                        raw_input=raw_input,
+                        normalized=normalized,
+                    )
+                # Still no result - Leader may have failed and cleared in-flight
+                # Use wait_timeout as conservative lower bound estimate
+                in_flight_age = dedupe_config.singleflight_wait_timeout_sec
+
+            # Calculate retry_after_sec (remaining lease time, minimum 0)
+            retry_after = max(
+                0.0,
+                dedupe_config.singleflight_lease_sec - in_flight_age,
+            )
+
             return DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
@@ -389,6 +426,13 @@ async def upsert_record_service(
                 record_type=record_type_enum.value,
                 record_name=norm_record,
                 warnings=warnings,
+                meta=ResponseMeta(
+                    singleflight=SingleflightInfo(
+                        in_flight=True,
+                        in_flight_age_sec=in_flight_age,
+                        retry_after_sec=retry_after,
+                    ),
+                ),
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
@@ -867,9 +911,7 @@ async def delete_record_service(
                 '[delete] Dedupe hit: "%s" ...',
                 dedupe_key[:16],
             )
-            resp_dict = build_dedupe_response_dict(
-                cached, dedupe_cache.window_seconds
-            )
+            resp_dict = build_dedupe_response_dict(cached, dedupe_cache.window_seconds)
             return DDNSResponse.from_dedupe_dict(
                 resp_dict,
                 dedupe_cache.window_seconds,
@@ -918,6 +960,42 @@ async def delete_record_service(
                 '[delete] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
             )
+
+            # Calculate in_flight_age_sec for singleflight info
+            in_flight_age = await dedupe_cache.get_in_flight_age(dedupe_key)
+
+            # Edge case: Leader may have completed during the race window
+            # between wait_for_result() timeout and get_in_flight_age() call
+            if in_flight_age is None:
+                # Try to get the result one more time
+                cached = await dedupe_cache.get(dedupe_key)
+                if cached is not None:
+                    # Leader completed! Return success instead of timeout error
+                    logger.debug(
+                        '[delete] Singleflight race: leader completed during timeout handling: "%s" ...',
+                        dedupe_key[:16],
+                    )
+                    resp_dict = build_dedupe_response_dict(
+                        cached,
+                        dedupe_cache.window_seconds,
+                    )
+                    return DDNSResponse.from_dedupe_dict(
+                        resp_dict,
+                        dedupe_cache.window_seconds,
+                        include_debug_info=include_debug_info,
+                        raw_input=raw_input,
+                        normalized=normalized,
+                    )
+                # Still no result - Leader may have failed and cleared in-flight
+                # Use wait_timeout as conservative lower bound estimate
+                in_flight_age = dedupe_config.singleflight_wait_timeout_sec
+
+            # Calculate retry_after_sec (remaining lease time, minimum 0)
+            retry_after = max(
+                0.0,
+                dedupe_config.singleflight_lease_sec - in_flight_age,
+            )
+
             return DDNSResponse.error(
                 provider=provider,
                 zone=norm_zone,
@@ -926,6 +1004,13 @@ async def delete_record_service(
                 errors=ErrorModel(
                     code=ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT,
                     message="Another request is in progress, wait timeout exceeded",
+                ),
+                meta=ResponseMeta(
+                    singleflight=SingleflightInfo(
+                        in_flight=True,
+                        in_flight_age_sec=in_flight_age,
+                        retry_after_sec=retry_after,
+                    ),
                 ),
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
