@@ -124,6 +124,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Validate token
         if not server_token:
+            client_ip = request.client.host if request.client else "unknown"
+            has_auth_header = bool(auth_header)
+            logger.debug(
+                '[auth: server] Missing server token. Path: "%s", Method: "%s", Client IP: "%s", Has Auth Header: "%s".',
+                request.url.path,
+                request.method,
+                client_ip,
+                has_auth_header,
+            )
             return JSONResponse(
                 status_code=ERROR_STATUS_MAP.get(
                     ErrorCode.MISSING_AUTH_TOKEN,
@@ -141,6 +150,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 ).model_dump(exclude_none=True),
             )
         if server_token not in config.auth.tokens:
+            client_ip = request.client.host if request.client else "unknown"
+            token_preview = (
+                f"{server_token[:6]}..." if len(server_token) > 6 else "******"  # noqa: PLR2004
+            )
+            logger.debug(
+                '[auth: server] Invalid server token. Path: "%s", Method: "%s", Client IP: "%s", Token Preview: "%s".',
+                request.url.path,
+                request.method,
+                client_ip,
+                token_preview,
+            )
             return JSONResponse(
                 status_code=ERROR_STATUS_MAP.get(
                     ErrorCode.INVALID_AUTH_TOKEN,
@@ -296,23 +316,68 @@ def extract_credentials_from_header(
         Credentials dictionary with provider-specific keys.
     """
     header_value = request.headers.get("x-upstream-authorization", "")
+    client_ip = request.client.host if request.client else "unknown"
     if not header_value:
+        logger.debug(
+            '[auth: upstream] Missing X-Upstream-Authorization header. Path: "%s", Method: "%s", '
+            'Client IP: "%s", Provider: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider.value,
+        )
         return {}
 
     auth_id, auth_secret = parse_upstream_auth(header_value)
+    if auth_id is None and auth_secret is None:
+        logger.debug(
+            '[auth: upstream] Invalid X-Upstream-Authorization format. Path: "%s", Method: "%s", '
+            'Client IP: "%s", Provider: "%s", Has ApiKey Prefix: "%s", Header Length: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider.value,
+            header_value.lower().startswith("apikey "),
+            len(header_value),
+        )
+        return {}
 
     creds: dict[str, str] = {}
+    has_id = bool(auth_id)
+    has_secret = bool(auth_secret)
 
     if provider == DNSProvider.CLOUDFLARE:
         # Cloudflare only needs secret (token), id is ignored if provided
         if auth_secret:
             creds["secret"] = auth_secret
+        else:
+            logger.debug(
+                '[auth: upstream] Missing credentials for provider. Path: "%s", Method: "%s", '
+                'Client IP: "%s", Provider: "%s", Has Id: "%s", Has Secret: "%s".',
+                request.url.path,
+                request.method,
+                client_ip,
+                provider.value,
+                has_id,
+                has_secret,
+            )
     elif provider in (DNSProvider.ALIYUN, DNSProvider.TENCENT):
         # Aliyun and Tencent use both id and secret
         if auth_id:
             creds["id"] = auth_id
         if auth_secret:
             creds["secret"] = auth_secret
+        if not (has_id and has_secret):
+            logger.debug(
+                '[auth: upstream] Missing credentials for provider. Path: "%s", Method: "%s", '
+                'Client IP: "%s", Provider: "%s", Has Id: "%s", Has Secret: "%s".',
+                request.url.path,
+                request.method,
+                client_ip,
+                provider.value,
+                has_id,
+                has_secret,
+            )
 
     return creds
 
@@ -368,13 +433,13 @@ def create_app(config: Config) -> FastAPI:
                 window_seconds=config.dedupe.window_seconds,
             )
             logger.info(
-                "[lifespan] DedupeCache initialized (max=%d, window=%ds)",
+                '[lifespan] DedupeCache initialized (Max Entries: "%d", Window: "%ds").',
                 config.dedupe.max_entries,
                 config.dedupe.window_seconds,
             )
         else:
             app.state.dedupe_cache = None
-            logger.info("[lifespan] DedupeCache disabled")
+            logger.info("[lifespan] DedupeCache disabled.")
 
         # Dynamically register "/health" endpoint (GET method) if enabled
         if config.health.enabled:
@@ -459,6 +524,19 @@ async def http_exception_handler(request: Request, exc: Exception) -> Response:
     user_message = "Server error" if is_server_error else "Request error"
 
     include_debug = _should_include_debug_info(request)
+    client_ip = request.client.host if request.client else "unknown"
+
+    log_level = logging.ERROR if is_server_error else logging.DEBUG
+    logger.log(
+        log_level,
+        '[request] HTTPException. Path: "%s", Method: "%s", Client IP: "%s", '
+        'Status: "%s", Detail: "%s".',
+        request.url.path,
+        request.method,
+        client_ip,
+        http_exc.status_code,
+        str(http_exc.detail),
+    )
 
     return JSONResponse(
         status_code=http_exc.status_code,
@@ -493,6 +571,16 @@ async def validation_exception_handler(request: Request, exc: Exception) -> Resp
 
     # Type narrowing for the actual exception type
     if not isinstance(exc, RequestValidationError):
+        client_ip = request.client.host if request.client else "unknown"
+        logger.error(
+            '[request] Unexpected validation exception type. Path: "%s", Method: "%s", '
+            'Client IP: "%s", Exception: "%s", Message: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            type(exc).__name__,
+            str(exc),
+        )
         return JSONResponse(
             status_code=ERROR_STATUS_MAP.get(
                 ErrorCode.INTERNAL_ERROR,
@@ -534,6 +622,16 @@ async def validation_exception_handler(request: Request, exc: Exception) -> Resp
         messages.append(f"Invalid fields: {'; '.join(invalid_fields)}.")
 
     message = ". ".join(messages) if messages else "Validation error"
+    client_ip = request.client.host if request.client else "unknown"
+    logger.debug(
+        '[request] Validation error. Path: "%s", Method: "%s", Client IP: "%s", '
+        'Missing Fields: "%s", Invalid Fields: "%s".',
+        request.url.path,
+        request.method,
+        client_ip,
+        ", ".join(missing_fields) if missing_fields else "N/A",
+        "; ".join(invalid_fields) if invalid_fields else "N/A",
+    )
 
     return JSONResponse(
         status_code=ERROR_STATUS_MAP.get(
@@ -690,6 +788,14 @@ async def upsert_ddns_record(
     try:
         provider_enum = DNSProvider(provider_lower)
     except ValueError:
+        client_ip = request.client.host if request.client else "unknown"
+        logger.debug(
+            '[request: upsert] Invalid provider. Path: "%s", Method: "%s", Client IP: "%s", Provider: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider,
+        )
         return JSONResponse(
             status_code=ERROR_STATUS_MAP.get(
                 ErrorCode.INVALID_PROVIDER,
@@ -714,6 +820,14 @@ async def upsert_ddns_record(
     # Get provider instance
     provider_instance = _providers.get(provider_enum)
     if provider_instance is None:
+        client_ip = request.client.host if request.client else "unknown"
+        logger.error(
+            '[request: upsert] Provider not initialized. Path: "%s", Method: "%s", Client IP: "%s", Provider: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider,
+        )
         return JSONResponse(
             status_code=ERROR_STATUS_MAP.get(
                 ErrorCode.INTERNAL_ERROR,
@@ -821,8 +935,9 @@ async def upsert_ddns_record(
     credentials = extract_credentials_from_header(provider_enum, request)
 
     # Log request
-    logger.info(
-        "[request] PUT /v1/ddns/%s/%s/%s/%s value=%s",
+    # Set to DEBUG level here because uvicorn already logs request info at INFO level
+    logger.debug(
+        '[request: upsert] PUT /v1/ddns/%s/%s/%s/%s, Value: "%s".',
         provider_lower,
         zone,
         record_type,
@@ -864,9 +979,9 @@ async def upsert_ddns_record(
         headers["Retry-After"] = str(retry_after)
 
     logger.info(
-        "[response] status=%s action=%s upstream_called=%s",
+        '[response: upsert] Status: "%s", Action: "%s", Upstream Called: "%s".',
         response.status,
-        response.action,
+        response.action or "N/A",
         response.upstream_called,
     )
 
@@ -913,6 +1028,14 @@ async def delete_ddns_record(
     try:
         provider_enum = DNSProvider(provider_lower)
     except ValueError:
+        client_ip = request.client.host if request.client else "unknown"
+        logger.debug(
+            '[request: delete] Invalid provider. Path: "%s", Method: "%s", Client IP: "%s", Provider: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider,
+        )
         return JSONResponse(
             status_code=ERROR_STATUS_MAP.get(
                 ErrorCode.INVALID_PROVIDER,
@@ -937,6 +1060,14 @@ async def delete_ddns_record(
     # Get provider instance
     provider_instance = _providers.get(provider_enum)
     if provider_instance is None:
+        client_ip = request.client.host if request.client else "unknown"
+        logger.error(
+            '[request: delete] Provider not initialized. Path: "%s", Method: "%s", Client IP: "%s", Provider: "%s".',
+            request.url.path,
+            request.method,
+            client_ip,
+            provider,
+        )
         return JSONResponse(
             status_code=ERROR_STATUS_MAP.get(
                 ErrorCode.INTERNAL_ERROR,
@@ -1013,9 +1144,17 @@ async def delete_ddns_record(
                             field="body",
                         ),
                     )
-        except Exception:  # noqa: S110, BLE001
+        except Exception as exc:  # noqa: BLE001
             # If reading body fails, skip warning (shouldn't happen in normal flow)
-            pass
+            client_ip = request.client.host if request.client else "unknown"
+            logger.debug(
+                "[request: delete] Failed to read request body. "
+                'Path: "%s", Method: "%s", Client IP: "%s", Error: "%s".',
+                request.url.path,
+                request.method,
+                client_ip,
+                f"{type(exc).__name__}: {exc}",
+            )
 
     # Check for query parameters (DELETE should not use query)
     query_params = dict(request.query_params)
@@ -1036,8 +1175,9 @@ async def delete_ddns_record(
         )
 
     # Log request
-    logger.info(
-        "[request] DELETE /v1/ddns/%s/%s/%s/%s",
+    # Set to DEBUG level here because uvicorn already logs request info at INFO level
+    logger.debug(
+        "[request: delete] DELETE /v1/ddns/%s/%s/%s/%s.",
         provider_lower,
         zone,
         record_type,
@@ -1074,9 +1214,9 @@ async def delete_ddns_record(
         headers["Retry-After"] = str(retry_after)
 
     logger.info(
-        "[response] status=%s action=%s upstream_called=%s",
+        '[response: delete] Status: "%s", Action: "%s", Upstream Called: "%s".',
         response.status,
-        response.action,
+        response.action or "N/A",
         response.upstream_called,
     )
 

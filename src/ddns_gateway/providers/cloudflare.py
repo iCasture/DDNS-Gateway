@@ -216,7 +216,7 @@ class CloudFlareProvider(BaseDNSProvider):
             try:
                 response = await client.post(url, headers=headers, json=payload)
                 logger.debug("[cloudflare] POST %s -> %d", url, response.status_code)
-                logger.debug("[cloudflare] Response: %s", response.text)
+                logger.debug("[cloudflare] Response: '%s'.", response.text)
 
                 data = response.json()
 
@@ -251,7 +251,7 @@ class CloudFlareProvider(BaseDNSProvider):
 
             except httpx.RequestError as e:
                 logger.error(  # noqa: TRY400
-                    "[cloudflare: CreateRecord] Network request failed: '%s'",
+                    "[cloudflare: CreateRecord] Network request failed: '%s'.",
                     e,
                 )
                 return UpstreamResult(
@@ -359,7 +359,7 @@ class CloudFlareProvider(BaseDNSProvider):
             async with httpx.AsyncClient(timeout=timeout_sec) as client:
                 response = await client.patch(url, headers=headers, json=payload)
                 logger.debug("[cloudflare] PATCH %s -> %d", url, response.status_code)
-                logger.debug("[cloudflare] Response: %s", response.text)
+                logger.debug("[cloudflare] Response: '%s'.", response.text)
 
                 data = response.json()
 
@@ -394,7 +394,7 @@ class CloudFlareProvider(BaseDNSProvider):
 
         except httpx.RequestError as e:
             logger.error(  # noqa: TRY400
-                "[cloudflare: UpdateRecord] Network request failed: '%s'",
+                "[cloudflare: UpdateRecord] Network request failed: '%s'.",
                 e,
             )
             return UpstreamResult(
@@ -456,7 +456,7 @@ class CloudFlareProvider(BaseDNSProvider):
             async with httpx.AsyncClient(timeout=timeout_sec) as client:
                 response = await client.delete(url, headers=headers)
                 logger.debug("[cloudflare] DELETE %s -> %d", url, response.status_code)
-                logger.debug("[cloudflare] Response: %s", response.text)
+                logger.debug("[cloudflare] Response: '%s'.", response.text)
 
                 data = response.json()
 
@@ -488,7 +488,7 @@ class CloudFlareProvider(BaseDNSProvider):
 
         except httpx.RequestError as e:
             logger.error(  # noqa: TRY400
-                "[cloudflare: DeleteRecord] Network request failed: '%s'",
+                "[cloudflare: DeleteRecord] Network request failed: '%s'.",
                 e,
             )
             return UpstreamResult(
@@ -570,7 +570,7 @@ class CloudFlareProvider(BaseDNSProvider):
         try:
             response = await client.get(url, headers=headers, params=params)
         except httpx.RequestError as e:
-            logger.error("[cloudflare] Network request failed: '%s'", e)  # noqa: TRY400
+            logger.error("[cloudflare] Network request failed: '%s'.", e)  # noqa: TRY400
             return None
 
         logger.debug(
@@ -581,11 +581,15 @@ class CloudFlareProvider(BaseDNSProvider):
         )
 
         if response.status_code != st_status.HTTP_200_OK:
-            logger.error("[cloudflare] Failed to get zones: '%s'", response.text)
+            logger.error(
+                "[cloudflare] Failed to get zones. Status: \"%d\", Response: '%s'.",
+                response.status_code,
+                response.text,
+            )
             return None
 
         data = response.json()
-        logger.debug("[cloudflare] Response: %s", response.text)
+        logger.debug("[cloudflare] Response: '%s'.", response.text)
 
         if not data.get("success"):
             return None
@@ -638,11 +642,15 @@ class CloudFlareProvider(BaseDNSProvider):
             )
 
             if response.status_code != st_status.HTTP_200_OK:
-                logger.error("[cloudflare] Failed to get records: '%s'", response.text)
+                logger.error(
+                    "[cloudflare] Failed to get records. Status: \"%d\", Response: '%s'.",
+                    response.status_code,
+                    response.text,
+                )
                 return None
 
             data = response.json()
-            logger.debug("[cloudflare] Response: %s", response.text)
+            logger.debug("[cloudflare] Response: '%s'.", response.text)
 
             if not data.get("success"):
                 return None
@@ -650,5 +658,5 @@ class CloudFlareProvider(BaseDNSProvider):
             return list(data.get("result", []))
 
         except httpx.RequestError as e:
-            logger.error("[cloudflare] Network request failed: '%s'", e)  # noqa: TRY400
+            logger.error("[cloudflare] Network request failed: '%s'.", e)  # noqa: TRY400
             return None
