@@ -302,6 +302,13 @@ async def upsert_record_service(
         try:
             record_type_enum = RecordType(record_type.upper())
         except ValueError:
+            logger.debug(
+                '[upsert] Invalid record type: "%s" (Provider: "%s", Zone: "%s", Record: "%s").',
+                record_type,
+                provider,
+                zone,
+                record,
+            )
             return DDNSResponse.error(
                 provider=provider,
                 zone=zone,
@@ -322,6 +329,17 @@ async def upsert_record_service(
         norm_comment = normalize_comment(comment)
 
     except NormalizeError as e:
+        logger.debug(
+            '[upsert] Normalize failed. Code: "%s", Field: "%s", Message: "%s" ',
+            '(Provider: "%s", Zone: "%s", Record: "%s", Type: "%s").',
+            e.code,
+            e.field,
+            e.message,
+            provider,
+            zone,
+            record,
+            record_type,
+        )
         return DDNSResponse.error(
             provider=provider,
             zone=zone,
@@ -396,7 +414,7 @@ async def upsert_record_service(
         cached = await dedupe_cache.get(dedupe_key)
         if cached is not None:
             logger.debug(
-                "[service: upsert] Dedupe hit: %s...",
+                '[upsert] Dedupe hit: "%s" ...',
                 dedupe_key[:16],
             )
             # Build response from cache
@@ -424,7 +442,7 @@ async def upsert_record_service(
         if not is_leader:
             # Another request is in progress, wait for result
             logger.debug(
-                "[service: upsert] Singleflight waiting: %s...",
+                '[upsert] Singleflight waiting: "%s" ...',
                 dedupe_key[:16],
             )
             sf_result = await dedupe_cache.wait_for_result(
@@ -448,7 +466,7 @@ async def upsert_record_service(
 
             # Wait timeout - return error (DO NOT retry)
             logger.warning(
-                "[service: upsert] Singleflight wait timeout: %s...",
+                '[upsert] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
             )
             return DDNSResponse.error(
@@ -479,7 +497,7 @@ async def upsert_record_service(
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
-            "[service: upsert] find_record failed: '%s'",
+            '[upsert] Failed to query existing record: "%s".',
             e,
         )
         # Clear singleflight so waiters get notified
@@ -524,7 +542,7 @@ async def upsert_record_service(
             )
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
-                "[service: upsert] create_record failed: '%s'",
+                '[upsert] Failed to create record: "%s".',
                 e,
             )
             # Clear singleflight so waiters get notified
@@ -685,7 +703,7 @@ async def upsert_record_service(
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
-            "[service: upsert] update_record failed: '%s'",
+            '[upsert] Failed to update record: "%s".',
             e,
         )
         # Clear singleflight so waiters get notified
@@ -860,6 +878,13 @@ async def delete_record_service(
         try:
             record_type_enum = RecordType(record_type.upper())
         except ValueError:
+            logger.debug(
+                '[delete] Invalid record type: "%s" (Provider: "%s", Zone: "%s", Record: "%s").',
+                record_type,
+                provider,
+                zone,
+                record,
+            )
             return DDNSResponse.error(
                 provider=provider,
                 zone=zone,
@@ -876,6 +901,17 @@ async def delete_record_service(
             )
 
     except NormalizeError as e:
+        logger.debug(
+            '[delete] Normalize failed. Code: "%s", Field: "%s", Message: "%s" '
+            '(Provider: "%s", Zone: "%s", Record: "%s", Type: "%s").',
+            e.code,
+            e.field,
+            e.message,
+            provider,
+            zone,
+            record,
+            record_type,
+        )
         return DDNSResponse.error(
             provider=provider,
             zone=zone,
@@ -918,7 +954,7 @@ async def delete_record_service(
         cached = await dedupe_cache.get(dedupe_key)
         if cached is not None:
             logger.debug(
-                "[service: delete] Dedupe hit: %s...",
+                '[delete] Dedupe hit: "%s" ...',
                 dedupe_key[:16],
             )
             resp_dict = build_deduped_response(cached, dedupe_cache.window_seconds)
@@ -944,7 +980,7 @@ async def delete_record_service(
         if not is_leader:
             # Another request is in progress, wait for result
             logger.debug(
-                "[service: delete] Singleflight waiting: %s...",
+                '[delete] Singleflight waiting: "%s" ...',
                 dedupe_key[:16],
             )
             sf_result = await dedupe_cache.wait_for_result(
@@ -967,7 +1003,7 @@ async def delete_record_service(
 
             # Wait timeout - return error (DO NOT retry)
             logger.warning(
-                "[service: delete] Singleflight wait timeout: %s...",
+                '[delete] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
             )
             return DDNSResponse.error(
@@ -997,7 +1033,7 @@ async def delete_record_service(
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
-            "[service: delete] find_record failed: '%s'",
+            '[delete] Failed to query existing record: "%s".',
             e,
         )
         # Clear singleflight so waiters get notified
@@ -1074,7 +1110,7 @@ async def delete_record_service(
         )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
-            "[service: delete] delete_record failed: '%s'",
+            '[delete] Failed to delete record: "%s".',
             e,
         )
         # Clear singleflight so waiters get notified

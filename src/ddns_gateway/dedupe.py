@@ -229,7 +229,7 @@ class DedupeCache:
                 # Expired, remove it
                 del self._entries[key_hash]
                 logger.debug(
-                    "[dedupe] Entry expired: %s... (age: %.1fs)",
+                    '[dedupe] Entry expired: "%s" (Age: "%.1fs") ...',
                     key_hash[:16],
                     now - entry.timestamp,
                 )
@@ -237,14 +237,14 @@ class DedupeCache:
 
             # Skip in-flight entries (Stage 4.2)
             if entry.in_flight:
-                logger.debug("[dedupe] Entry in-flight: %s...", key_hash[:16])
+                logger.debug('[dedupe] Entry in-flight: "%s" ...', key_hash[:16])
                 return None
 
             # LRU: move to end
             self._entries.move_to_end(key_hash)
 
             logger.debug(
-                "[dedupe] Cache hit: %s... (age: %.1fs)",
+                '[dedupe] Cache hit: "%s" (Age: "%.1fs") ...',
                 key_hash[:16],
                 now - entry.timestamp,
             )
@@ -299,7 +299,7 @@ class DedupeCache:
             while len(self._entries) >= self._max_entries:
                 oldest_key, oldest_entry = self._entries.popitem(last=False)
                 logger.debug(
-                    "[dedupe] Evicted oldest: %s... (age: %.1fs)",
+                    '[dedupe] Evicted oldest: "%s" (Age: "%.1fs") ...',
                     oldest_key[:16],
                     now - oldest_entry.timestamp,
                 )
@@ -308,7 +308,7 @@ class DedupeCache:
             self._entries.move_to_end(key_hash)
 
             logger.debug(
-                "[dedupe] Cache set: %s... (size: %d/%d)",
+                '[dedupe] Cache set: "%s" (Size: "%d / %d") ...',
                 key_hash[:16],
                 len(self._entries),
                 self._max_entries,
@@ -337,7 +337,7 @@ class DedupeCache:
         async with self._lock:
             if key_hash in self._entries:
                 del self._entries[key_hash]
-                logger.debug("[dedupe] Deleted: %s...", key_hash[:16])
+                logger.debug('[dedupe] Deleted: "%s" ...', key_hash[:16])
                 return True
             return False
 
@@ -362,7 +362,7 @@ class DedupeCache:
 
             if expired:
                 logger.debug(
-                    "[dedupe] Cleanup removed %d expired entries",
+                    "[dedupe] Cleanup removed %d expired entries ...",
                     len(expired),
                 )
             return len(expired)
@@ -379,7 +379,7 @@ class DedupeCache:
         async with self._lock:
             count = len(self._entries)
             self._entries.clear()
-            logger.debug("[dedupe] Cleared all %d entries", count)
+            logger.debug("[dedupe] Cleared all %d entries ...", count)
             return count
 
     async def size(self) -> int:
@@ -439,7 +439,7 @@ class DedupeCache:
                         return False  # Lease still valid, cannot takeover
                     # Lease expired, allow takeover
                     logger.debug(
-                        "[dedupe] Lease expired for %s... (age=%.1fs > %.1fs), takeover",
+                        '[dedupe] Lease expired for "%s" (Age: "%.1fs" > "%.1fs"), takeover ...',
                         key_hash[:16],
                         age,
                         lease_sec,
@@ -465,7 +465,7 @@ class DedupeCache:
                 _event=event,
             )
             self._entries.move_to_end(key_hash)
-            logger.debug("[dedupe] Marked in-flight: %s...", key_hash[:16])
+            logger.debug('[dedupe] Marked in-flight: "%s" ...', key_hash[:16])
             return True
 
     async def clear_in_flight(self, key_hash: str) -> None:
@@ -489,7 +489,7 @@ class DedupeCache:
 
             event_to_set = entry._event  # noqa: SLF001
             del self._entries[key_hash]
-            logger.debug("[dedupe] Cleared in-flight: %s...", key_hash[:16])
+            logger.debug('[dedupe] Cleared in-flight: "%s" ...', key_hash[:16])
 
         # Notify waiters AFTER releasing lock (they'll get None)
         if event_to_set is not None:
@@ -540,7 +540,7 @@ class DedupeCache:
             await asyncio.wait_for(event.wait(), timeout=wait_timeout_sec)
         except TimeoutError:
             logger.debug(
-                "[dedupe] Wait timeout for %s... (%.1fs)",
+                '[dedupe] Wait timeout for "%s" (Timeout: "%.1fs") ...',
                 key_hash[:16],
                 wait_timeout_sec,
             )
@@ -551,7 +551,7 @@ class DedupeCache:
             entry = self._entries.get(key_hash)
             if entry is None or entry.in_flight or entry.base is None:
                 return None
-            logger.debug("[dedupe] Wait succeeded for %s...", key_hash[:16])
+            logger.debug('[dedupe] Wait succeeded for "%s" ...', key_hash[:16])
             return entry
 
     # =========================================================================
@@ -621,7 +621,7 @@ class DedupeCache:
                     self._entries[key] = entry
                     loaded += 1
 
-            logger.debug("[dedupe] Loaded %d entries from persistence", loaded)
+            logger.debug("[dedupe] Loaded %d entries from persistence ...", loaded)
             return loaded
 
 

@@ -227,7 +227,7 @@ def setup_logging(config: LoggingConfig) -> None:
             logger.info('File logging enabled: "%s".', log_path)
         except OSError as e:
             # Re-raise as a fatal error after logging to console
-            logger.critical("Failed to enable file logging: %s", e)
+            logger.critical('[logging] Failed to enable file logging: "%s".', e)
             sys.exit(1)
 
     # Prevent propagation to root logger
@@ -282,7 +282,7 @@ def build_uvicorn_log_config(config: LoggingConfig) -> dict:
             log_path.touch(exist_ok=True)
         except OSError as e:
             logger = logging.getLogger(ROOT_LOGGER_NAME)
-            logger.critical("Failed to create log file: %s", e)
+            logger.critical('[logging] Failed to create log file: "%s".', e)
             sys.exit(1)
 
         # Define file formatter with consistent format and date format

@@ -8,6 +8,7 @@ Endpoint: dnspod.tencentcloudapi.com
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -211,9 +212,13 @@ class TencentProvider(BaseDNSProvider):
             request_id = response.RequestId
 
             logger.debug(
-                "[tencent] CreateRecord -> RequestId: %s, RecordId: %s",
+                '[tencent: CreateRecord] RequestId: "%s", RecordId: "%s".',
                 request_id,
                 record_id,
+            )
+            logger.debug(
+                "[tencent: CreateRecord] Response: '%s'.",
+                json.loads(response.to_json_string()),
             )
 
             return UpstreamResult(
@@ -227,7 +232,7 @@ class TencentProvider(BaseDNSProvider):
 
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
-                "[tencent: CreateRecord] Failed to create record: '%s'",
+                "[tencent: CreateRecord] Failed to create record: '%s'.",
                 e,
             )
             return UpstreamResult(
@@ -315,7 +320,11 @@ class TencentProvider(BaseDNSProvider):
             response = await client.ModifyRecord(request)
             request_id = response.RequestId
 
-            logger.debug("[tencent] ModifyRecord -> RequestId: %s", request_id)
+            logger.debug('[tencent: ModifyRecord] RequestId: "%s".', request_id)
+            logger.debug(
+                "[tencent: ModifyRecord] Response: '%s'.",
+                json.loads(response.to_json_string()),
+            )
 
             return UpstreamResult(
                 success=True,
@@ -329,7 +338,7 @@ class TencentProvider(BaseDNSProvider):
 
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
-                "[tencent: ModifyRecord] Failed to update: '%s'",
+                "[tencent: ModifyRecord] Failed to update: '%s'.",
                 e,
             )
             return UpstreamResult(
@@ -384,7 +393,11 @@ class TencentProvider(BaseDNSProvider):
             response = await client.DeleteRecord(request)
             request_id = response.RequestId
 
-            logger.debug("[tencent] DeleteRecord -> RequestId: %s", request_id)
+            logger.debug('[tencent: DeleteRecord] RequestId: "%s".', request_id)
+            logger.debug(
+                "[tencent: DeleteRecord] Response: '%s'.",
+                json.loads(response.to_json_string()),
+            )
 
             return UpstreamResult(
                 success=True,
@@ -397,7 +410,7 @@ class TencentProvider(BaseDNSProvider):
 
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
-                "[tencent: DeleteRecord] Failed to delete: '%s'",
+                "[tencent: DeleteRecord] Failed to delete: '%s'.",
                 e,
             )
             return UpstreamResult(
@@ -440,12 +453,16 @@ class TencentProvider(BaseDNSProvider):
 
             response = await client.DescribeRecordList(request)
             logger.debug(
-                "[tencent] DescribeRecordList -> RequestId: %s",
+                '[tencent: DescribeRecordList] RequestId: "%s".',
                 response.RequestId,
             )
             logger.debug(
-                "[tencent] Response: RecordCountInfo=%s",
+                "[tencent: DescribeRecordList] RecordCountInfo: '%s'.",
                 response.RecordCountInfo,
+            )
+            logger.debug(
+                "[tencent: DescribeRecordList] Response: '%s'.",
+                json.loads(response.to_json_string()),
             )
 
             if response.RecordList is None:
@@ -470,10 +487,12 @@ class TencentProvider(BaseDNSProvider):
             # Handle "no records found" as empty list, not error
             error_msg = str(e)
             if "ResourceNotFound.NoDataOfRecord" in error_msg:
-                logger.debug("[tencent] No records found (not an error)")
+                logger.debug(
+                    "[tencent: DescribeRecordList] No records found (not an error).",
+                )
                 return []
             logger.error(  # noqa: TRY400
-                "[tencent: DescribeRecordList] Failed to describe record list: '%s'",
+                "[tencent: DescribeRecordList] Failed to describe record list: '%s'.",
                 e,
             )
             return None
