@@ -303,6 +303,34 @@ class TestDedupeCache:
         assert cache.max_entries == 100
         assert cache.window_seconds == 600
 
+    @pytest.mark.asyncio
+    async def test_hit_count_increments(self, sample_base: CachedResponseBase):
+        """Test that hit_count increments on each cache hit."""
+        cache = DedupeCache()
+        await cache.set("key1", sample_base)
+
+        # First hit
+        entry1 = await cache.get("key1")
+        assert entry1 is not None
+        assert entry1.hit_count == 1
+
+        # Second hit
+        entry2 = await cache.get("key1")
+        assert entry2 is not None
+        assert entry2.hit_count == 2
+
+        # Third hit
+        entry3 = await cache.get("key1")
+        assert entry3 is not None
+        assert entry3.hit_count == 3
+
+    @pytest.mark.asyncio
+    async def test_hit_count_starts_at_zero_after_set(self, sample_base: CachedResponseBase):
+        """Test that hit_count is 0 immediately after set (before any get)."""
+        cache = DedupeCache()
+        entry = await cache.set("key1", sample_base)
+        assert entry.hit_count == 0
+
 
 # =============================================================================
 # Singleflight Tests
