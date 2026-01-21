@@ -377,10 +377,14 @@ class DedupeInfo(BaseModel):
         Whether the request was a cache hit (short-circuited).
     window_sec : int
         The deduplication time window in seconds.
+    hit_count : int | None
+        Cache hit count. Only present when hit=True.
+        First cache hit sets hit_count=1, second hit sets hit_count=2, etc.
     """
 
     hit: bool
     window_sec: int
+    hit_count: int | None = None
 
 
 class SingleflightInfo(BaseModel):
@@ -1169,6 +1173,7 @@ class DDNSResponse(BaseModel):
                 dedupe=DedupeInfo(
                     hit=True,
                     window_sec=window_seconds,
+                    hit_count=resp_dict.get("meta", {}).get("dedupe", {}).get("hit_count"),
                 ),
             ),
             debug=debug,

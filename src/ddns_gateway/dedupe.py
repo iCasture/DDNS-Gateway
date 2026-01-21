@@ -135,6 +135,9 @@ class DedupeEntry:
         Unix timestamp when entry was created.
     base : CachedResponseBase | None
         The cached response base (immutable). None when in_flight.
+    hit_count : int
+        Cache hit count. Incremented each time this entry is retrieved via get().
+        First upstream call does not count; first cache hit sets hit_count = 1.
     in_flight : bool
         Flag for Singleflight. True = request in progress.
     in_flight_started_at : float | None
@@ -146,6 +149,7 @@ class DedupeEntry:
     key_hash: str
     timestamp: float
     base: CachedResponseBase | None = None
+    hit_count: int = 0  # Cache hit count (incremented on each cache hit)
     in_flight: bool = False
     in_flight_started_at: float | None = None
     lease_sec: float | None = None  # Original lease duration for this entry
@@ -243,10 +247,14 @@ class DedupeCache:
             # LRU: move to end
             self._entries.move_to_end(key_hash)
 
+            # Increment hit count
+            entry.hit_count += 1
+
             logger.debug(
-                '[dedupe] Cache hit: "%s" (Age: "%.1fs") ...',
+                '[dedupe] Cache hit: "%s" (Age: "%.1fs", Hits: "%d") ...',
                 key_hash[:16],
                 now - entry.timestamp,
+                entry.hit_count,
             )
             return entry
 
@@ -756,6 +764,7 @@ def build_dedupe_response_dict(
         "dedupe": {
             "hit": True,
             "window_sec": window_seconds,
+            "hit_count": entry.hit_count,
         },
     }
 
