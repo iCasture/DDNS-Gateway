@@ -27,7 +27,7 @@ class TestAuthMiddleware:
         assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
         data = response.json()
         assert data["status"] == "error"
-        assert any(e["code"] == "MISSING_AUTH_TOKEN" for e in data["errors"])
+        assert any(e["code"] == "MISSING_GATEWAY_TOKEN" for e in data["errors"])
 
     def test_invalid_token_returns_401(self, client_auth_enabled):
         """Test that invalid Bearer token returns 401."""
@@ -40,7 +40,7 @@ class TestAuthMiddleware:
         assert response.status_code == st_status.HTTP_401_UNAUTHORIZED
         data = response.json()
         assert data["status"] == "error"
-        assert any(e["code"] == "INVALID_AUTH_TOKEN" for e in data["errors"])
+        assert any(e["code"] == "INVALID_GATEWAY_TOKEN" for e in data["errors"])
 
     def test_valid_token_passes_auth(self, client_auth_enabled):
         """Test that valid Bearer token passes authentication (may fail at provider)."""
@@ -50,11 +50,9 @@ class TestAuthMiddleware:
             headers={"Authorization": "Bearer valid-token"},
         )
 
-        # Should not be 401/403 - may be 400 due to missing provider credentials
-        assert response.status_code not in [
-            st_status.HTTP_401_UNAUTHORIZED,
-            st_status.HTTP_403_FORBIDDEN,
-        ]
+        # Should not be 401 (gateway auth error)
+        # 403 is acceptable - it indicates upstream auth failure, meaning gateway auth passed
+        assert response.status_code != st_status.HTTP_401_UNAUTHORIZED
 
     def test_auth_disabled_allows_request(self, client_auth_disabled):
         """Test that auth disabled allows request without Authorization header."""
@@ -63,11 +61,9 @@ class TestAuthMiddleware:
             json={"value": "1.2.3.4"},
         )
 
-        # Should not be 401/403
-        assert response.status_code not in [
-            st_status.HTTP_401_UNAUTHORIZED,
-            st_status.HTTP_403_FORBIDDEN,
-        ]
+        # Should not be 401 (gateway auth error)
+        # 403 is acceptable - it indicates upstream auth failure, meaning gateway auth passed
+        assert response.status_code != st_status.HTTP_401_UNAUTHORIZED
 
     def test_bearer_token_case_insensitive(self, client_auth_enabled):
         """Test that 'bearer' prefix is case-insensitive."""
@@ -77,11 +73,9 @@ class TestAuthMiddleware:
             headers={"Authorization": "BEARER valid-token"},
         )
 
-        # Should not be 401/403
-        assert response.status_code not in [
-            st_status.HTTP_401_UNAUTHORIZED,
-            st_status.HTTP_403_FORBIDDEN,
-        ]
+        # Should not be 401 (gateway auth error)
+        # 403 is acceptable - it indicates upstream auth failure, meaning gateway auth passed
+        assert response.status_code != st_status.HTTP_401_UNAUTHORIZED
 
 
 class TestValidationErrorHandler:
@@ -206,11 +200,9 @@ class TestDeleteEndpoint:
             headers={"Authorization": "Bearer valid-token"},
         )
 
-        # Should not be 401/403
-        assert response.status_code not in [
-            st_status.HTTP_401_UNAUTHORIZED,
-            st_status.HTTP_403_FORBIDDEN,
-        ]
+        # Should not be 401 (gateway auth error)
+        # 403 is acceptable - it indicates upstream auth failure, meaning gateway auth passed
+        assert response.status_code != st_status.HTTP_401_UNAUTHORIZED
 
     def test_delete_without_auth_returns_401(self, client_auth_enabled):
         """Test DELETE endpoint without auth returns 401."""

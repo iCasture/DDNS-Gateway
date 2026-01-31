@@ -18,8 +18,13 @@ from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.dnspod.v20210323 import dnspod_client_async, models
 
 from ddns_gateway.normalize import comments_equal, normalize_upstream_value
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderError
-from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
+from ddns_gateway.providers.base import BaseDNSProvider, CredentialError, ProviderError
+from ddns_gateway.types import (
+    DesiredState,
+    ExistingRecord,
+    UpstreamErrorDetail,
+    UpstreamResult,
+)
 
 if TYPE_CHECKING:
     from typing import Any, Final
@@ -90,7 +95,7 @@ class TencentProvider(BaseDNSProvider):
         record_type: RecordType,
         credentials: dict[str, str],
         timeout_sec: float | None = None,
-    ) -> ExistingRecord | None:
+    ) -> ExistingRecord | UpstreamErrorDetail | None:
         """
         Find an existing DNS record.
 
@@ -109,27 +114,27 @@ class TencentProvider(BaseDNSProvider):
 
         Returns
         -------
-        ExistingRecord | None
-            The existing record if found, None otherwise.
+        ExistingRecord | UpstreamErrorDetail | None
+            The existing record if found, UpstreamErrorDetail if API error,
+            None if record not found.
 
         Raises
         ------
         ProviderError
-            If multiple records are found or API error occurs.
+            If multiple records are found or missing credentials.
         """
         secret_id = credentials.get("id")
         secret_key = credentials.get("secret")
 
         if not secret_id or not secret_key:
             msg = "Missing required credentials: id and secret"
-            raise ProviderError(msg)
+            raise CredentialError(msg)
 
         client = self._create_client(secret_id, secret_key, timeout_sec)
         records = await self._describe_records(client, zone, record, record_type)
 
-        if records is None:
-            msg = "Failed to query DNS records from Tencent API"
-            raise ProviderError(msg)
+        if isinstance(records, UpstreamErrorDetail):
+            return records
 
         if len(records) == 0:
             return None
@@ -188,11 +193,8 @@ class TencentProvider(BaseDNSProvider):
         secret_key = credentials.get("secret")
 
         if not secret_id or not secret_key:
-            return UpstreamResult(
-                success=False,
-                action="created",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(secret_id, secret_key, timeout_sec)
 
@@ -274,11 +276,8 @@ class TencentProvider(BaseDNSProvider):
         secret_key = credentials.get("secret")
 
         if not secret_id or not secret_key:
-            return UpstreamResult(
-                success=False,
-                action="updated",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(secret_id, secret_key, timeout_sec)
 
@@ -377,11 +376,8 @@ class TencentProvider(BaseDNSProvider):
         secret_key = credentials.get("secret")
 
         if not secret_id or not secret_key:
-            return UpstreamResult(
-                success=False,
-                action="deleted",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(secret_id, secret_key, timeout_sec)
 
@@ -425,7 +421,7 @@ class TencentProvider(BaseDNSProvider):
         zone: str,
         record_name: str,
         record_type: RecordType,
-    ) -> list[dict[str, Any]] | None:
+    ) -> list[dict[str, Any]] | UpstreamErrorDetail:
         """
         Query DNS records.
 
@@ -442,8 +438,8 @@ class TencentProvider(BaseDNSProvider):
 
         Returns
         -------
-        list[dict[str, Any]] | None
-            List of matching records or None on error.
+        list[dict[str, Any]] | UpstreamErrorDetail
+            List of matching records if successful, UpstreamErrorDetail if API error.
         """
         try:
             request = models.DescribeRecordListRequest()
@@ -495,4 +491,14 @@ class TencentProvider(BaseDNSProvider):
                 "[tencent: DescribeRecordList] Failed to describe record list: '%s'.",
                 e,
             )
-            return None
+            # Extract error details from Tencent SDK exception
+            error_code = getattr(e, "code", None) or ""
+            error_message = getattr(e, "message", None) or str(e)
+            error_codes = [str(error_code)] if error_code else []
+            error_messages = [str(error_message)] if error_message else []
+            return UpstreamErrorDetail(
+                http_status=0,  # Tencent SDK doesn't expose HTTP status
+                error_codes=error_codes,
+                error_messages=error_messages,
+                raw_body=None,
+            )

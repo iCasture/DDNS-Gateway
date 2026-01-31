@@ -198,7 +198,7 @@ include_debug_info = false               # 是否在响应中包含调试信息�
 
 `X-Upstream-Authorization` 使用 ApiKey 认证方案，基本格式如下：
 
-> 需要注意引号。
+> 需要注意逗号 & 引号。
 
 ```text
 ApiKey id="<ID>", secret="<SECRET>"
@@ -206,7 +206,7 @@ ApiKey id="<ID>", secret="<SECRET>"
 
 若某些服务商不需要 `id`（例如 Cloudflare），可省略：
 
-> 需要注意引号。
+> 需要注意逗号 & 引号。
 
 ```text
 ApiKey secret="<SECRET>"
@@ -427,7 +427,7 @@ curl "http://localhost:38080/health"
     {
     "status": "error",
     "code": 401,
-    "message": "Missing authentication token"
+    "message": "XXX"
     }
     ```
 
@@ -437,7 +437,7 @@ curl "http://localhost:38080/health"
     {
     "status": "error",
     "code": 401,
-    "message": "Invalid authentication token"
+    "message": "XXX"
     }
     ```
 
@@ -715,6 +715,8 @@ curl "http://localhost:38080/health"
 | `Multiple records found`       | 存在重复记录                                          | 手动清理 DNS 控制台中的重复记录                                                                                                           |
 
 若密钥错误 / 权限不够，可至相应云服务商控制台处，检查相应 Key 的访问日志查看具体原因。
+
+Gateway 认证错误（无效 Token / 缺失 Token）返回 401；上游认证错误（无效 Token / 缺失 Token）返回 403。
 
 ### 7.2. 调试模式
 

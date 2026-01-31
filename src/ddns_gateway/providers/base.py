@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ddns_gateway.models import RecordType
-    from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
+    from ddns_gateway.types import (
+        DesiredState,
+        ExistingRecord,
+        UpstreamErrorDetail,
+        UpstreamResult,
+    )
 
 
 class ProviderError(Exception):
@@ -46,6 +51,15 @@ class ProviderError(Exception):
         self.code = code
 
 
+class CredentialError(ProviderError):
+    """
+    Exception raised when provider credentials are missing or invalid.
+
+    This error occurs BEFORE any upstream API call is made, so
+    upstream_called should be False when this exception is caught.
+    """
+
+
 class BaseDNSProvider(ABC):
     """
     Abstract base class for DNS providers.
@@ -75,7 +89,7 @@ class BaseDNSProvider(ABC):
         record_type: RecordType,
         credentials: dict[str, str],
         timeout_sec: float | None = None,
-    ) -> ExistingRecord | None:
+    ) -> ExistingRecord | UpstreamErrorDetail | None:
         """
         Find an existing DNS record.
 
@@ -94,9 +108,9 @@ class BaseDNSProvider(ABC):
 
         Returns
         -------
-        ExistingRecord | None
-            The existing record if found, None otherwise.
-            If multiple records match, raises ProviderError.
+        ExistingRecord | UpstreamErrorDetail | None
+            The existing record if found, UpstreamErrorDetail if API error,
+            None if record not found.
 
         Raises
         ------

@@ -135,13 +135,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             return JSONResponse(
                 status_code=ERROR_STATUS_MAP.get(
-                    ErrorCode.MISSING_AUTH_TOKEN,
+                    ErrorCode.MISSING_GATEWAY_TOKEN,
                     st_status.HTTP_401_UNAUTHORIZED,
                 ),
                 content=DDNSResponse.error(
                     errors=ErrorModel(
-                        code=ErrorCode.MISSING_AUTH_TOKEN,
-                        message="Missing authentication token",
+                        code=ErrorCode.MISSING_GATEWAY_TOKEN,
+                        message="Missing gateway authentication token in Authorization header",
                     ),
                     provider="unknown",
                     zone="",
@@ -163,13 +163,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             return JSONResponse(
                 status_code=ERROR_STATUS_MAP.get(
-                    ErrorCode.INVALID_AUTH_TOKEN,
-                    st_status.HTTP_403_FORBIDDEN,
+                    ErrorCode.INVALID_GATEWAY_TOKEN,
+                    st_status.HTTP_401_UNAUTHORIZED,
                 ),
                 content=DDNSResponse.error(
                     errors=ErrorModel(
-                        code=ErrorCode.INVALID_AUTH_TOKEN,
-                        message="Invalid authentication token",
+                        code=ErrorCode.INVALID_GATEWAY_TOKEN,
+                        message="Invalid gateway authentication token",
                     ),
                     provider="unknown",
                     zone="",
