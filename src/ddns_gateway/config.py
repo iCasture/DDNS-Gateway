@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 
-from ddns_gateway.logging_config import DATE_FORMAT, LOG_FORMAT
+from ddns_gateway.logging_config import DATE_FORMAT, LOG_FORMAT, ShortNameFormatter
 
 if TYPE_CHECKING:
     from typing import Any
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger_basic = logging.getLogger(__name__)
 logger_basic.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
-formatter = logging.Formatter(
+formatter = ShortNameFormatter(
     fmt=LOG_FORMAT,
     datefmt=DATE_FORMAT,
 )
@@ -523,20 +523,14 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         dest="response_debug_info",
         action="store_true",
         default=None,
-        help=(
-            "Include response debug details "
-            "(overrides response.include_debug_info)"
-        ),
+        help=("Include response debug details (overrides response.include_debug_info)"),
     )
     response_group.add_argument(
         "-D",
         "--no-response-debug-info",
         dest="response_debug_info",
         action="store_false",
-        help=(
-            "Disable response debug details "
-            "(overrides response.include_debug_info)"
-        ),
+        help=("Disable response debug details (overrides response.include_debug_info)"),
     )
 
     return parser.parse_args(args)
@@ -603,9 +597,9 @@ def load_config(args: argparse.Namespace | None = None) -> Config:
 
     # Response overrides
     if args.response_debug_info is not None:
-        cli_overrides.setdefault("response", {})[
-            "include_debug_info"
-        ] = args.response_debug_info
+        cli_overrides.setdefault("response", {})["include_debug_info"] = (
+            args.response_debug_info
+        )
 
     if cli_overrides:
         config_dict = merge_config(config_dict, cli_overrides)

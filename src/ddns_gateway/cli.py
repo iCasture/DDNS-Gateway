@@ -38,7 +38,9 @@ def main() -> None:
     if config.server.host == "0.0.0.0":  # noqa: S104
         logger = logging.getLogger(__name__)
         logger.warning(
-            'Binding to "0.0.0.0" exposes the service to all network interfaces. '
+            'Binding to "0.0.0.0" exposes the service to all network interfaces.',
+        )
+        logger.warning(
             "This is a security risk if the service is not behind a reverse proxy. "
             'Consider using "127.0.0.1" for local-only access.',
         )
