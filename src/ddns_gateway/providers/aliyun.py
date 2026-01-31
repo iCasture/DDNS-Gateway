@@ -17,8 +17,13 @@ from alibabacloud_tea_util import models as util_models
 
 from ddns_gateway.models import RecordType, WarningCode, WarningModel
 from ddns_gateway.normalize import comments_equal, normalize_upstream_value
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderError
-from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
+from ddns_gateway.providers.base import BaseDNSProvider, CredentialError, ProviderError
+from ddns_gateway.types import (
+    DesiredState,
+    ExistingRecord,
+    UpstreamErrorDetail,
+    UpstreamResult,
+)
 
 if TYPE_CHECKING:
     from typing import Any, Final
@@ -78,7 +83,7 @@ class AliyunProvider(BaseDNSProvider):
         record_type: RecordType,
         credentials: dict[str, str],
         timeout_sec: float | None = None,
-    ) -> ExistingRecord | None:
+    ) -> ExistingRecord | UpstreamErrorDetail | None:
         """
         Find an existing DNS record.
 
@@ -97,20 +102,21 @@ class AliyunProvider(BaseDNSProvider):
 
         Returns
         -------
-        ExistingRecord | None
-            The existing record if found, None otherwise.
+        ExistingRecord | UpstreamErrorDetail | None
+            The existing record if found, UpstreamErrorDetail if API error,
+            None if record not found.
 
         Raises
         ------
         ProviderError
-            If multiple records are found or API error occurs.
+            If multiple records are found or missing credentials.
         """
         access_key_id = credentials.get("id")
         access_key_secret = credentials.get("secret")
 
         if not access_key_id or not access_key_secret:
             msg = "Missing required credentials: id and secret"
-            raise ProviderError(msg)
+            raise CredentialError(msg)
 
         client = self._create_client(access_key_id, access_key_secret)
         if timeout_sec is not None:
@@ -130,9 +136,8 @@ class AliyunProvider(BaseDNSProvider):
             record_type,
         )
 
-        if records is None:
-            msg = "Failed to query DNS records from Aliyun API"
-            raise ProviderError(msg)
+        if isinstance(records, UpstreamErrorDetail):
+            return records
 
         if len(records) == 0:
             return None
@@ -191,11 +196,8 @@ class AliyunProvider(BaseDNSProvider):
         access_key_secret = credentials.get("secret")
 
         if not access_key_id or not access_key_secret:
-            return UpstreamResult(
-                success=False,
-                action="created",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(access_key_id, access_key_secret)
         if timeout_sec is not None:
@@ -309,11 +311,8 @@ class AliyunProvider(BaseDNSProvider):
         access_key_secret = credentials.get("secret")
 
         if not access_key_id or not access_key_secret:
-            return UpstreamResult(
-                success=False,
-                action="updated",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(access_key_id, access_key_secret)
         if timeout_sec is not None:
@@ -449,11 +448,8 @@ class AliyunProvider(BaseDNSProvider):
         access_key_secret = credentials.get("secret")
 
         if not access_key_id or not access_key_secret:
-            return UpstreamResult(
-                success=False,
-                action="deleted",
-                message="Missing required credentials: id and secret",
-            )
+            msg = "Missing required credentials: id and secret"
+            raise CredentialError(msg)
 
         client = self._create_client(access_key_id, access_key_secret)
         if timeout_sec is not None:
@@ -508,7 +504,7 @@ class AliyunProvider(BaseDNSProvider):
         zone: str,
         rr: str,
         record_type: RecordType,
-    ) -> list[dict[str, Any]] | None:
+    ) -> list[dict[str, Any]] | UpstreamErrorDetail:
         """
         Query DNS records.
 
@@ -527,8 +523,8 @@ class AliyunProvider(BaseDNSProvider):
 
         Returns
         -------
-        list[dict[str, Any]] | None
-            List of matching records or None on error.
+        list[dict[str, Any]] | UpstreamErrorDetail
+            List of matching records if successful, UpstreamErrorDetail if API error.
         """
         try:
             request = alidns_models.DescribeDomainRecordsRequest(
@@ -572,7 +568,18 @@ class AliyunProvider(BaseDNSProvider):
                 "[aliyun: DescribeDomainRecords] Failed to describe domain records: '%s'.",
                 e,
             )
-            return None
+            # Extract error details from Aliyun SDK exception
+            error_code = getattr(e, "code", None) or getattr(e, "errCode", None) or ""
+            error_message = getattr(e, "message", None) or str(e)
+            http_status = getattr(e, "http_status", 0) or getattr(e, "statusCode", 0)
+            error_codes = [str(error_code)] if error_code else []
+            error_messages = [str(error_message)] if error_message else []
+            return UpstreamErrorDetail(
+                http_status=int(http_status) if http_status else 0,
+                error_codes=error_codes,
+                error_messages=error_messages,
+                raw_body=None,
+            )
 
     async def _update_record_remark(
         self,

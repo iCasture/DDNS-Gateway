@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal, Self, overload
+from typing import Any, Literal, Self
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -133,10 +133,10 @@ class ErrorCode(StrEnum):
         Invalid domain name format.
     TXT_VALUE_TOO_LONG : str
         TXT record value exceeds maximum length.
-    MISSING_AUTH_TOKEN : str
-        Authentication token not provided.
-    INVALID_AUTH_TOKEN : str
-        Authentication token is invalid.
+    MISSING_GATEWAY_TOKEN : str
+        Gateway authentication token not provided.
+    INVALID_GATEWAY_TOKEN : str
+        Gateway authentication token is invalid.
     MISSING_UPSTREAM_CREDENTIALS : str
         Upstream provider credentials not provided.
     INVALID_UPSTREAM_CREDENTIALS : str
@@ -149,6 +149,10 @@ class ErrorCode(StrEnum):
         Multiple matching records found (ambiguous).
     UPSTREAM_API_ERROR : str
         Upstream provider API returned an error.
+    UPSTREAM_AUTH_ERROR : str
+        Upstream provider authentication failed (401/403 or auth-related error codes).
+    UPSTREAM_RATE_LIMITED : str
+        Upstream provider rate limit exceeded (429 or rate-limit error codes).
     INTERNAL_ERROR : str
         Internal server error.
     SINGLEFLIGHT_WAIT_TIMEOUT : str
@@ -166,8 +170,8 @@ class ErrorCode(StrEnum):
     TXT_VALUE_TOO_LONG = "TXT_VALUE_TOO_LONG"
 
     # Authentication errors
-    MISSING_AUTH_TOKEN = "MISSING_AUTH_TOKEN"  # noqa: S105
-    INVALID_AUTH_TOKEN = "INVALID_AUTH_TOKEN"  # noqa: S105
+    MISSING_GATEWAY_TOKEN = "MISSING_GATEWAY_TOKEN"  # noqa: S105
+    INVALID_GATEWAY_TOKEN = "INVALID_GATEWAY_TOKEN"  # noqa: S105
     MISSING_UPSTREAM_CREDENTIALS = "MISSING_UPSTREAM_CREDENTIALS"
     INVALID_UPSTREAM_CREDENTIALS = "INVALID_UPSTREAM_CREDENTIALS"
 
@@ -176,6 +180,8 @@ class ErrorCode(StrEnum):
     RECORD_NOT_FOUND = "RECORD_NOT_FOUND"
     MULTIPLE_RECORDS_FOUND = "MULTIPLE_RECORDS_FOUND"
     UPSTREAM_API_ERROR = "UPSTREAM_API_ERROR"
+    UPSTREAM_AUTH_ERROR = "UPSTREAM_AUTH_ERROR"
+    UPSTREAM_RATE_LIMITED = "UPSTREAM_RATE_LIMITED"
 
     # Internal errors
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -199,8 +205,8 @@ ERROR_STATUS_MAP: dict[str, int] = {
     ErrorCode.INVALID_DOMAIN_FORMAT: st_status.HTTP_400_BAD_REQUEST,
     ErrorCode.TXT_VALUE_TOO_LONG: st_status.HTTP_400_BAD_REQUEST,
     # 401 Unauthorized - Missing/invalid auth
-    ErrorCode.MISSING_AUTH_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
-    ErrorCode.INVALID_AUTH_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
+    ErrorCode.MISSING_GATEWAY_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
+    ErrorCode.INVALID_GATEWAY_TOKEN: st_status.HTTP_401_UNAUTHORIZED,
     # 403 Forbidden - Missing/invalid upstream credentials
     ErrorCode.MISSING_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
     ErrorCode.INVALID_UPSTREAM_CREDENTIALS: st_status.HTTP_403_FORBIDDEN,
@@ -213,6 +219,8 @@ ERROR_STATUS_MAP: dict[str, int] = {
     ErrorCode.INTERNAL_ERROR: st_status.HTTP_500_INTERNAL_SERVER_ERROR,
     # 502 Bad Gateway - Upstream API error
     ErrorCode.UPSTREAM_API_ERROR: st_status.HTTP_502_BAD_GATEWAY,
+    ErrorCode.UPSTREAM_AUTH_ERROR: st_status.HTTP_502_BAD_GATEWAY,
+    ErrorCode.UPSTREAM_RATE_LIMITED: st_status.HTTP_502_BAD_GATEWAY,
     # 504 Gateway Timeout - Singleflight wait timeout
     ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT: st_status.HTTP_504_GATEWAY_TIMEOUT,
 }
@@ -1173,7 +1181,9 @@ class DDNSResponse(BaseModel):
                 dedupe=DedupeInfo(
                     hit=True,
                     window_sec=window_seconds,
-                    hit_count=resp_dict.get("meta", {}).get("dedupe", {}).get("hit_count"),
+                    hit_count=resp_dict.get("meta", {})
+                    .get("dedupe", {})
+                    .get("hit_count"),
                 ),
             ),
             debug=debug,

@@ -102,6 +102,35 @@ class DesiredState:
 
 
 @dataclass
+class UpstreamErrorDetail:
+    """
+    Details about an upstream API error.
+
+    This data class captures structured error information from upstream
+    provider APIs, enabling proper error classification and debugging.
+
+    Attributes
+    ----------
+    http_status : int
+        The HTTP status code from the upstream API (0 if not available).
+    error_codes : list[str]
+        Provider-specific error codes (e.g., from Cloudflare ``errors`` array).
+        May contain multiple codes; classification uses the first for
+        single-code providers and "any match" for Cloudflare.
+    error_messages : list[str]
+        Original error messages from the upstream API (one per error when
+        multiple, e.g., Cloudflare ``errors`` array).
+    raw_body : dict[str, Any] | None
+        The complete response body from the upstream API (for DEBUG mode only).
+    """
+
+    http_status: int
+    error_codes: list[str] = field(default_factory=list)
+    error_messages: list[str] = field(default_factory=list)
+    raw_body: dict[str, Any] | None = None
+
+
+@dataclass
 class UpstreamResult:
     """
     Result from an upstream provider operation.
@@ -133,6 +162,8 @@ class UpstreamResult:
         Additional provider-specific metadata.
     warnings : list[WarningModel]
         List of non-critical warnings generated during the operation.
+    error_detail : UpstreamErrorDetail | None
+        Structured error details from upstream API (for error responses).
     """
 
     success: bool
@@ -146,3 +177,4 @@ class UpstreamResult:
     raw_status: str | None = None
     extra: dict[str, str] | None = None
     warnings: list[WarningModel] = field(default_factory=list)  # type: ignore[assignment]
+    error_detail: UpstreamErrorDetail | None = None

@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from starlette import status as st_status
+
 from ddns_gateway.dedupe import (
     build_dedupe_response_dict,
     compute_dedupe_key,
@@ -46,7 +48,8 @@ from ddns_gateway.normalize import (
     normalize_value,
     normalize_zone,
 )
-from ddns_gateway.types import DesiredState
+from ddns_gateway.providers.base import CredentialError
+from ddns_gateway.types import DesiredState, UpstreamErrorDetail
 
 if TYPE_CHECKING:
     from ddns_gateway.config import DedupeConfig
@@ -55,6 +58,145 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Upstream Error Classification
+# =============================================================================
+
+
+def _classify_by_http_status(detail: UpstreamErrorDetail) -> ErrorCode | None:
+    """
+    Classify error by HTTP status code only.
+
+    Returns the appropriate ErrorCode for 401/403 (auth) or 429 (rate limit),
+    or None if the status does not map to a known classification.
+
+    Parameters
+    ----------
+    detail : UpstreamErrorDetail
+        The upstream error details.
+
+    Returns
+    -------
+    ErrorCode | None
+        UPSTREAM_AUTH_ERROR for 401/403, UPSTREAM_RATE_LIMITED for 429,
+        or None otherwise.
+    """
+    if detail.http_status in (
+        st_status.HTTP_401_UNAUTHORIZED,
+        st_status.HTTP_403_FORBIDDEN,
+    ):
+        return ErrorCode.UPSTREAM_AUTH_ERROR
+    if detail.http_status == st_status.HTTP_429_TOO_MANY_REQUESTS:
+        return ErrorCode.UPSTREAM_RATE_LIMITED
+    return None
+
+
+def _map_upstream_error(detail: UpstreamErrorDetail, provider: str) -> ErrorCode:
+    """
+    Map upstream error details to an appropriate ErrorCode.
+
+    - Cloudflare: classify by HTTP status first, then by error code(s);
+                  any matching code in ``detail.error_codes`` is used.
+    - Aliyun / Tencent: classify by the first error code,
+                        then by HTTP status as fallback.
+
+    Parameters
+    ----------
+    detail : UpstreamErrorDetail
+        The upstream error details.
+    provider : str
+        The DNS provider name (lowercase).
+
+    Returns
+    -------
+    ErrorCode
+        The classified error code (UPSTREAM_AUTH_ERROR, UPSTREAM_RATE_LIMITED,
+        or UPSTREAM_API_ERROR).
+    """
+    # Cloudflare: HTTP status first, then error code(s)
+    if provider == "cloudflare":
+        if (status_result := _classify_by_http_status(detail)) is not None:
+            return status_result
+
+        cf_codes = detail.error_codes
+
+        # Cloudflare auth / permission errors
+        if any(c in ("6003", "9103", "9106", "9109", "10000") for c in cf_codes):
+            return ErrorCode.UPSTREAM_AUTH_ERROR
+
+        # Cloudflare rate limit
+        if any(c == "1015" for c in cf_codes):
+            return ErrorCode.UPSTREAM_RATE_LIMITED
+
+        return ErrorCode.UPSTREAM_API_ERROR
+
+    # Aliyun / Tencent: first error code, then HTTP status as fallback
+    code = (detail.error_codes[0] if detail.error_codes else "") or ""
+
+    # https://api.aliyun.com/document/Alidns/2015-01-09/errorCode
+    if provider == "aliyun":
+        if code.startswith("InvalidAccessKeyId") or code in (
+            "OperationDomain.NoPermission",
+            "Forbidden",
+            "SignatureDoesNotMatch",
+        ):
+            return ErrorCode.UPSTREAM_AUTH_ERROR
+
+        if code.startswith("Throttling"):
+            return ErrorCode.UPSTREAM_RATE_LIMITED
+
+    # https://cloud.tencent.com/document/product/1427/56192
+    elif provider == "tencent":
+        if code.startswith(
+            (
+                "AuthFailure",
+                "UnauthorizedOperation",
+                "OperationDenied",
+            ),
+        ) or code in (
+            "IpNotInWhitelist",
+            "IpInBlacklist",
+            "InvalidParameter.PermissionDenied",
+        ):
+            return ErrorCode.UPSTREAM_AUTH_ERROR
+
+        if code.startswith("RequestLimitExceeded") or code in (
+            "FailedOperation.FrequencyLimit",
+            "InvalidParameter.OperationIsTooFrequent",
+            "InvalidParameter.Common",
+        ):
+            return ErrorCode.UPSTREAM_RATE_LIMITED
+
+    # HTTP status fallback (shared for aliyun, tencent, and unknown provider)
+    status_result = _classify_by_http_status(detail)
+    if status_result is not None:
+        return status_result
+
+    return ErrorCode.UPSTREAM_API_ERROR
+
+
+def _get_upstream_error_message(error_code: ErrorCode) -> str:
+    """
+    Get a user-friendly error message for an upstream error code.
+
+    Parameters
+    ----------
+    error_code : ErrorCode
+        The classified error code.
+
+    Returns
+    -------
+    str
+        A user-friendly error message.
+    """
+    messages = {
+        ErrorCode.UPSTREAM_AUTH_ERROR: "Upstream authentication failed",
+        ErrorCode.UPSTREAM_RATE_LIMITED: "Upstream rate limit exceeded",
+        ErrorCode.UPSTREAM_API_ERROR: "Upstream API error",
+    }
+    return messages.get(error_code, "Upstream API error")
 
 
 # =============================================================================
@@ -240,7 +382,7 @@ async def upsert_record_service(
 
     except NormalizeError as e:
         logger.debug(
-            '[upsert] Normalize failed. Code: "%s", Field: "%s", Message: "%s" ',
+            '[upsert] Normalize failed. Code: "%s", Field: "%s", Message: "%s" '
             '(Provider: "%s", Zone: "%s", Record: "%s", Type: "%s").',
             e.code,
             e.field,
@@ -449,6 +591,29 @@ async def upsert_record_service(
             credentials=credentials,
             timeout_sec=timeout_sec,
         )
+    except CredentialError as e:
+        logger.debug(
+            '[upsert] Missing credentials for find_record: "%s".',
+            e,
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        return DDNSResponse.error(
+            errors=ErrorModel(
+                code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
+                message=str(e),
+            ),
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            upstream_called=False,
+            warnings=warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
             '[upsert] Failed to query existing record: "%s".',
@@ -473,6 +638,60 @@ async def upsert_record_service(
             normalized=normalized,
         )
 
+    # Handle UpstreamErrorDetail returned from find_record
+    if isinstance(existing, UpstreamErrorDetail):
+        logger.error(
+            '[upsert] Upstream API error during find_record. HTTP: "%s", Codes: "%s", Messages: "%s".',
+            existing.http_status,
+            None
+            if not existing.error_codes
+            else (
+                existing.error_codes[0]
+                if len(existing.error_codes) == 1
+                else existing.error_codes
+            ),
+            None
+            if not existing.error_messages
+            else (
+                existing.error_messages[0]
+                if len(existing.error_messages) == 1
+                else existing.error_messages
+            ),
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        error_code = _map_upstream_error(existing, provider)
+        error_message = _get_upstream_error_message(error_code)
+        return DDNSResponse.error(
+            errors=ErrorModel(
+                code=error_code,
+                message=error_message,
+                details={"upstream_http_status": existing.http_status}
+                if existing.http_status
+                else None,
+            ),
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            upstream_called=True,
+            warnings=warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+            extra={
+                "upstream_response": {
+                    "http_status": existing.http_status,
+                    "error_codes": existing.error_codes,
+                    "error_messages": existing.error_messages,
+                    "body": existing.raw_body,
+                },
+            }
+            if include_debug_info
+            else None,
+        )
+
     # Build desired state
     desired = DesiredState(
         value=norm_value,
@@ -493,6 +712,29 @@ async def upsert_record_service(
                 desired=desired,
                 credentials=credentials,
                 timeout_sec=timeout_sec,
+            )
+        except CredentialError as e:
+            logger.debug(
+                '[upsert] Missing credentials for create_record: "%s".',
+                e,
+            )
+            # Clear singleflight so waiters get notified
+            if dedupe_cache is not None and is_leader and dedupe_key:
+                await dedupe_cache.clear_in_flight(dedupe_key)
+            return DDNSResponse.error(
+                errors=ErrorModel(
+                    code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
+                    message=str(e),
+                ),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record_name=norm_record,
+                upstream_called=False,
+                warnings=warnings,
+                include_debug_info=include_debug_info,
+                raw_input=raw_input,
+                normalized=normalized,
             )
         except Exception as e:  # noqa: BLE001
             logger.error(  # noqa: TRY400
@@ -522,20 +764,50 @@ async def upsert_record_service(
             # Clear singleflight so waiters get notified
             if dedupe_cache is not None and is_leader and dedupe_key:
                 await dedupe_cache.clear_in_flight(dedupe_key)
+
+            # Determine error code based on error_detail if available
+            if result.error_detail is not None:
+                error_code = _map_upstream_error(result.error_detail, provider)
+                error_message = _get_upstream_error_message(error_code)
+                error_details: dict[str, Any] | None = (
+                    {"upstream_http_status": result.error_detail.http_status}
+                    if result.error_detail.http_status
+                    else None
+                )
+                extra_debug: dict[str, Any] | None = (
+                    {
+                        "upstream_response": {
+                            "http_status": result.error_detail.http_status,
+                            "error_codes": result.error_detail.error_codes,
+                            "error_messages": result.error_detail.error_messages,
+                            "body": result.error_detail.raw_body,
+                        },
+                    }
+                    if include_debug_info
+                    else None
+                )
+            else:
+                error_code = ErrorCode.UPSTREAM_API_ERROR
+                error_message = result.message
+                error_details = None
+                extra_debug = None
+
             return DDNSResponse.error(
                 provider=provider,
                 zone=norm_zone,
                 record_type=record_type_enum.value,
                 record_name=norm_record,
                 errors=ErrorModel(
-                    code=ErrorCode.UPSTREAM_API_ERROR,
-                    message=result.message,
+                    code=error_code,
+                    message=error_message,
+                    details=error_details,
                 ),
                 upstream_called=True,
                 warnings=warnings + (result.warnings or []),
                 include_debug_info=include_debug_info,
                 raw_input=raw_input,
                 normalized=normalized,
+                extra=extra_debug,
             )
 
         # Update dedupe cache
@@ -655,6 +927,29 @@ async def upsert_record_service(
             credentials=credentials,
             timeout_sec=timeout_sec,
         )
+    except CredentialError as e:
+        logger.debug(
+            '[upsert] Missing credentials for update_record: "%s".',
+            e,
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        return DDNSResponse.error(
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            errors=ErrorModel(
+                code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
+                message=str(e),
+            ),
+            upstream_called=False,
+            warnings=warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
             '[upsert] Failed to update record: "%s".',
@@ -683,20 +978,50 @@ async def upsert_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
+
+        # Determine error code based on error_detail if available
+        if result.error_detail is not None:
+            error_code = _map_upstream_error(result.error_detail, provider)
+            error_message = _get_upstream_error_message(error_code)
+            err_details: dict[str, Any] | None = (
+                {"upstream_http_status": result.error_detail.http_status}
+                if result.error_detail.http_status
+                else None
+            )
+            dbg_extra: dict[str, Any] | None = (
+                {
+                    "upstream_response": {
+                        "http_status": result.error_detail.http_status,
+                        "error_codes": result.error_detail.error_codes,
+                        "error_messages": result.error_detail.error_messages,
+                        "body": result.error_detail.raw_body,
+                    },
+                }
+                if include_debug_info
+                else None
+            )
+        else:
+            error_code = ErrorCode.UPSTREAM_API_ERROR
+            error_message = result.message
+            err_details = None
+            dbg_extra = None
+
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
             record_name=norm_record,
             errors=ErrorModel(
-                code=ErrorCode.UPSTREAM_API_ERROR,
-                message=result.message,
+                code=error_code,
+                message=error_message,
+                details=err_details,
             ),
             upstream_called=True,
             warnings=warnings + (result.warnings or []),
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
+            extra=dbg_extra,
         )
 
     # Compute effective values for cache
@@ -1028,6 +1353,28 @@ async def delete_record_service(
             credentials=credentials,
             timeout_sec=timeout_sec,
         )
+    except CredentialError as e:
+        logger.debug(
+            '[delete] Missing credentials for find_record: "%s".',
+            e,
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        return DDNSResponse.error(
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            errors=ErrorModel(
+                code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
+                message=str(e),
+            ),
+            upstream_called=False,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
             '[delete] Failed to query existing record: "%s".',
@@ -1049,6 +1396,60 @@ async def delete_record_service(
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
+        )
+
+    # Handle UpstreamErrorDetail returned from find_record
+    if isinstance(existing, UpstreamErrorDetail):
+        logger.error(
+            '[delete] Upstream API error during find_record. HTTP: "%s", Codes: "%s", Messages: "%s".',
+            existing.http_status,
+            None
+            if not existing.error_codes
+            else (
+                existing.error_codes[0]
+                if len(existing.error_codes) == 1
+                else existing.error_codes
+            ),
+            None
+            if not existing.error_messages
+            else (
+                existing.error_messages[0]
+                if len(existing.error_messages) == 1
+                else existing.error_messages
+            ),
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        error_code = _map_upstream_error(existing, provider)
+        error_message = _get_upstream_error_message(error_code)
+        return DDNSResponse.error(
+            errors=ErrorModel(
+                code=error_code,
+                message=error_message,
+                details={"upstream_http_status": existing.http_status}
+                if existing.http_status
+                else None,
+            ),
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            upstream_called=True,
+            warnings=warnings,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+            extra={
+                "upstream_response": {
+                    "http_status": existing.http_status,
+                    "error_codes": existing.error_codes,
+                    "error_messages": existing.error_messages,
+                    "body": existing.raw_body,
+                },
+            }
+            if include_debug_info
+            else None,
         )
 
     # -------------------------------------------------------------------------
@@ -1105,6 +1506,28 @@ async def delete_record_service(
             credentials=credentials,
             timeout_sec=timeout_sec,
         )
+    except CredentialError as e:
+        logger.debug(
+            '[delete] Missing credentials for delete_record: "%s".',
+            e,
+        )
+        # Clear singleflight so waiters get notified
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            await dedupe_cache.clear_in_flight(dedupe_key)
+        return DDNSResponse.error(
+            provider=provider,
+            zone=norm_zone,
+            record_type=record_type_enum.value,
+            record_name=norm_record,
+            errors=ErrorModel(
+                code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
+                message=str(e),
+            ),
+            upstream_called=False,
+            include_debug_info=include_debug_info,
+            raw_input=raw_input,
+            normalized=normalized,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(  # noqa: TRY400
             '[delete] Failed to delete record: "%s".',
@@ -1132,20 +1555,50 @@ async def delete_record_service(
         # Clear singleflight so waiters get notified
         if dedupe_cache is not None and is_leader and dedupe_key:
             await dedupe_cache.clear_in_flight(dedupe_key)
+
+        # Determine error code based on error_detail if available
+        if result.error_detail is not None:
+            error_code = _map_upstream_error(result.error_detail, provider)
+            error_message = _get_upstream_error_message(error_code)
+            error_details: dict[str, Any] | None = (
+                {"upstream_http_status": result.error_detail.http_status}
+                if result.error_detail.http_status
+                else None
+            )
+            extra_debug: dict[str, Any] | None = (
+                {
+                    "upstream_response": {
+                        "http_status": result.error_detail.http_status,
+                        "error_codes": result.error_detail.error_codes,
+                        "error_messages": result.error_detail.error_messages,
+                        "body": result.error_detail.raw_body,
+                    },
+                }
+                if include_debug_info
+                else None
+            )
+        else:
+            error_code = ErrorCode.UPSTREAM_API_ERROR
+            error_message = result.message
+            error_details = None
+            extra_debug = None
+
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
             record_type=record_type_enum.value,
             record_name=norm_record,
             errors=ErrorModel(
-                code=ErrorCode.UPSTREAM_API_ERROR,
-                message=result.message,
+                code=error_code,
+                message=error_message,
+                details=error_details,
             ),
             upstream_called=True,
             warnings=result.warnings,
             include_debug_info=include_debug_info,
             raw_input=raw_input,
             normalized=normalized,
+            extra=extra_debug,
         )
 
     # Update dedupe cache

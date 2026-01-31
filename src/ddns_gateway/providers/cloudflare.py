@@ -15,8 +15,13 @@ from starlette import status as st_status
 
 from ddns_gateway.models import WarningCode, WarningModel
 from ddns_gateway.normalize import comments_equal, normalize_upstream_value
-from ddns_gateway.providers.base import BaseDNSProvider, ProviderError
-from ddns_gateway.types import DesiredState, ExistingRecord, UpstreamResult
+from ddns_gateway.providers.base import BaseDNSProvider, CredentialError, ProviderError
+from ddns_gateway.types import (
+    DesiredState,
+    ExistingRecord,
+    UpstreamErrorDetail,
+    UpstreamResult,
+)
 
 if TYPE_CHECKING:
     from typing import Final
@@ -51,7 +56,7 @@ class CloudFlareProvider(BaseDNSProvider):
         record_type: RecordType,
         credentials: dict[str, str],
         timeout_sec: float | None = None,
-    ) -> ExistingRecord | None:
+    ) -> ExistingRecord | UpstreamErrorDetail | None:
         """
         Find an existing DNS record.
 
@@ -70,18 +75,19 @@ class CloudFlareProvider(BaseDNSProvider):
 
         Returns
         -------
-        ExistingRecord | None
-            The existing record if found, None otherwise.
+        ExistingRecord | UpstreamErrorDetail | None
+            The existing record if found, UpstreamErrorDetail if API error,
+            None if record not found.
 
         Raises
         ------
         ProviderError
-            If multiple records found or API error.
+            If multiple records found or missing credentials.
         """
         cf_token = credentials.get("secret")
         if not cf_token:
             msg = "Missing required credential: secret"
-            raise ProviderError(msg)
+            raise CredentialError(msg)
 
         headers = {
             "Authorization": f"Bearer {cf_token}",
@@ -92,10 +98,13 @@ class CloudFlareProvider(BaseDNSProvider):
 
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             # Get Zone ID
-            zone_id = await self._get_zone_id(client, headers, zone)
-            if zone_id is None:
+            zone_id_result = await self._get_zone_id(client, headers, zone)
+            if zone_id_result is None:
                 msg = f"Zone not found for domain: {zone}"
                 raise ProviderError(msg)
+            if isinstance(zone_id_result, UpstreamErrorDetail):
+                return zone_id_result
+            zone_id = zone_id_result
 
             # Query existing records
             records = await self._get_records(
@@ -105,6 +114,9 @@ class CloudFlareProvider(BaseDNSProvider):
                 fqdn,
                 record_type,
             )
+
+            if isinstance(records, UpstreamErrorDetail):
+                return records
 
             if records is None:
                 msg = "Failed to query DNS records"
@@ -169,11 +181,8 @@ class CloudFlareProvider(BaseDNSProvider):
         """
         cf_token = credentials.get("secret")
         if not cf_token:
-            return UpstreamResult(
-                success=False,
-                action="created",
-                message="Missing required credential: secret",
-            )
+            msg = "Missing required credential: secret"
+            raise CredentialError(msg)
 
         headers = {
             "Authorization": f"Bearer {cf_token}",
@@ -184,13 +193,22 @@ class CloudFlareProvider(BaseDNSProvider):
 
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             # Get Zone ID
-            zone_id = await self._get_zone_id(client, headers, zone)
-            if zone_id is None:
+            zone_id_result = await self._get_zone_id(client, headers, zone)
+            if zone_id_result is None:
                 return UpstreamResult(
                     success=False,
                     action="created",
                     message=f"Zone not found for domain: {zone}",
                 )
+            if isinstance(zone_id_result, UpstreamErrorDetail):
+                return UpstreamResult(
+                    success=False,
+                    action="created",
+                    message="Upstream API error",
+                    http_status=zone_id_result.http_status,
+                    error_detail=zone_id_result,
+                )
+            zone_id = zone_id_result
 
             url = f"{CF_API_BASE}/zones/{zone_id}/dns_records"
 
@@ -298,11 +316,8 @@ class CloudFlareProvider(BaseDNSProvider):
 
         cf_token = credentials.get("secret")
         if not cf_token:
-            return UpstreamResult(
-                success=False,
-                action="updated",
-                message="Missing required credential: secret",
-            )
+            msg = "Missing required credential: secret"
+            raise CredentialError(msg)
 
         headers = {
             "Authorization": f"Bearer {cf_token}",
@@ -438,11 +453,8 @@ class CloudFlareProvider(BaseDNSProvider):
 
         cf_token = credentials.get("secret")
         if not cf_token:
-            return UpstreamResult(
-                success=False,
-                action="deleted",
-                message="Missing required credential: secret",
-            )
+            msg = "Missing required credential: secret"
+            raise CredentialError(msg)
 
         headers = {
             "Authorization": f"Bearer {cf_token}",
@@ -546,7 +558,7 @@ class CloudFlareProvider(BaseDNSProvider):
         client: httpx.AsyncClient,
         headers: dict[str, str],
         zone: str,
-    ) -> str | None:
+    ) -> str | UpstreamErrorDetail | None:
         """
         Get the Zone ID for a domain.
 
@@ -561,8 +573,8 @@ class CloudFlareProvider(BaseDNSProvider):
 
         Returns
         -------
-        str | None
-            Zone ID or None if not found.
+        str | UpstreamErrorDetail | None
+            Zone ID if found, UpstreamErrorDetail if API error, None if zone not found.
         """
         url = f"{CF_API_BASE}/zones"
         params = {"name": zone}
@@ -571,7 +583,12 @@ class CloudFlareProvider(BaseDNSProvider):
             response = await client.get(url, headers=headers, params=params)
         except httpx.RequestError as e:
             logger.error("[cloudflare] Network request failed: '%s'.", e)  # noqa: TRY400
-            return None
+            return UpstreamErrorDetail(
+                http_status=0,
+                error_codes=[],
+                error_messages=[str(e)],
+                raw_body=None,
+            )
 
         logger.debug(
             "[cloudflare] GET %s?name=%s -> %d",
@@ -580,19 +597,41 @@ class CloudFlareProvider(BaseDNSProvider):
             response.status_code,
         )
 
+        try:
+            data = response.json()
+        except (ValueError, TypeError):
+            data = {}
+
         if response.status_code != st_status.HTTP_200_OK:
             logger.error(
                 "[cloudflare] Failed to get zones. Status: \"%d\", Response: '%s'.",
                 response.status_code,
                 response.text,
             )
-            return None
+            # Extract error details from Cloudflare response (all codes/messages)
+            errors = data.get("errors", [])
+            error_codes = [str(e.get("code", "")) for e in errors] if errors else []
+            error_messages = [e.get("message", "") for e in errors] if errors else []
+            return UpstreamErrorDetail(
+                http_status=response.status_code,
+                error_codes=error_codes,
+                error_messages=error_messages,
+                raw_body=data if data else None,
+            )
 
-        data = response.json()
         logger.debug("[cloudflare] Response: '%s'.", response.text)
 
         if not data.get("success"):
-            return None
+            # API returned success=false with 200 status (unusual but possible)
+            errors = data.get("errors", [])
+            error_codes = [str(e.get("code", "")) for e in errors] if errors else []
+            error_messages = [e.get("message", "") for e in errors] if errors else []
+            return UpstreamErrorDetail(
+                http_status=response.status_code,
+                error_codes=error_codes,
+                error_messages=error_messages,
+                raw_body=data,
+            )
 
         zones = data.get("result", [])
         if zones:
@@ -606,7 +645,7 @@ class CloudFlareProvider(BaseDNSProvider):
         zone_id: str,
         fqdn: str,
         record_type: RecordType,
-    ) -> list[dict] | None:  # type: ignore[type-arg]
+    ) -> list[dict] | UpstreamErrorDetail | None:  # type: ignore[type-arg]
         """
         Get DNS records matching the criteria.
 
@@ -625,8 +664,9 @@ class CloudFlareProvider(BaseDNSProvider):
 
         Returns
         -------
-        list[dict] | None
-            List of records or None on error.
+        list[dict] | UpstreamErrorDetail | None
+            List of records if successful, UpstreamErrorDetail if API error,
+            None on network error.
         """
         url = f"{CF_API_BASE}/zones/{zone_id}/dns_records"
         params = {"name": fqdn, "type": record_type.value}
@@ -641,22 +681,47 @@ class CloudFlareProvider(BaseDNSProvider):
                 response.status_code,
             )
 
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+
             if response.status_code != st_status.HTTP_200_OK:
                 logger.error(
                     "[cloudflare] Failed to get records. Status: \"%d\", Response: '%s'.",
                     response.status_code,
                     response.text,
                 )
-                return None
+                errors = data.get("errors", [])
+                error_codes = [str(e.get("code", "")) for e in errors] if errors else []
+                error_messages = [e.get("message", "") for e in errors] if errors else []
+                return UpstreamErrorDetail(
+                    http_status=response.status_code,
+                    error_codes=error_codes,
+                    error_messages=error_messages,
+                    raw_body=data if data else None,
+                )
 
-            data = response.json()
             logger.debug("[cloudflare] Response: '%s'.", response.text)
 
             if not data.get("success"):
-                return None
+                errors = data.get("errors", [])
+                error_codes = [str(e.get("code", "")) for e in errors] if errors else []
+                error_messages = [e.get("message", "") for e in errors] if errors else []
+                return UpstreamErrorDetail(
+                    http_status=response.status_code,
+                    error_codes=error_codes,
+                    error_messages=error_messages,
+                    raw_body=data,
+                )
 
             return list(data.get("result", []))
 
         except httpx.RequestError as e:
             logger.error("[cloudflare] Network request failed: '%s'.", e)  # noqa: TRY400
-            return None
+            return UpstreamErrorDetail(
+                http_status=0,
+                error_codes=[],
+                error_messages=[str(e)],
+                raw_body=None,
+            )
