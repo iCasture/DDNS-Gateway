@@ -77,7 +77,7 @@ SENSITIVE_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
 
 
 # Constants
-LOG_FORMAT: Final[str] = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
+LOG_FORMAT: Final[str] = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
 DATE_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S"
 
 # Automatically determine the root logger name from the package name
@@ -173,6 +173,43 @@ class SensitiveFilter(logging.Filter):
         return True
 
 
+class ShortNameFormatter(logging.Formatter):
+    """
+    A custom formatter that shortens logger names.
+
+    This formatter removes the root package prefix from logger names
+    to reduce visual noise in log output.
+
+    Examples
+    --------
+    - "ddns_gateway.cli" -> "cli"
+    - "ddns_gateway.config" -> "config"
+    - "ddns_gateway" -> "root"
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """
+        Format the log record with a shortened logger name.
+
+        Parameters
+        ----------
+        record : logging.LogRecord
+            The log record to format.
+
+        Returns
+        -------
+        str
+            The formatted log message.
+        """
+        # Shorten the logger name by removing the root package prefix
+        prefix = ROOT_LOGGER_NAME + "."
+        if record.name.startswith(prefix):
+            record.name = record.name[len(prefix) :]
+        elif record.name == ROOT_LOGGER_NAME:
+            record.name = "root"
+        return super().format(record)
+
+
 def _configure_handler(handler: logging.Handler) -> None:
     """
     Configure a logging handler with formatter and sensitive filter.
@@ -182,7 +219,7 @@ def _configure_handler(handler: logging.Handler) -> None:
     handler : logging.Handler
         The handler to configure.
     """
-    formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT)
+    formatter = ShortNameFormatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT)
     sensitive_filter = SensitiveFilter()
 
     handler.setFormatter(formatter)
@@ -287,6 +324,7 @@ def build_uvicorn_log_config(config: LoggingConfig) -> dict:
 
         # Define file formatter with consistent format and date format
         formatter_config = {
+            "()": f"{__name__}.ShortNameFormatter",
             "format": LOG_FORMAT,
             "datefmt": DATE_FORMAT,
         }
