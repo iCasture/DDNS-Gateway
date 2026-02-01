@@ -603,7 +603,92 @@ Or set in the configuration file:
 level = "DEBUG"
 ```
 
-## 8. Risk Notice
+## 8. Technical Details
+
+### 8.1. Request Deduplication Cache (Dedupe Cache)
+
+DDNS Gateway includes a built-in request deduplication cache to avoid redundant upstream API calls for identical requests within a short time window.
+
+#### Cache Key Computation
+
+The cache key is computed from the following fields (SHA256 hash):
+
+| Field | In Key | Reason |
+|-------|--------|--------|
+| `operation` | ✅ | Separates upsert/delete |
+| `provider` | ✅ | Different providers |
+| `zone` | ✅ | Different domains |
+| `record_type` | ✅ | Different record types |
+| `record` | ✅ | Different record names |
+| `value` | ✅ | Different values |
+| `ttl` | ✅ | Different TTLs |
+| `comment` | ✅ | Different comments |
+| `proxied` | ✅ | Cloudflare proxy status |
+| `upstream_credential_hash` | ✅ | Different credentials → separate cache |
+| `gateway_token` | ❌ | Gateway auth unrelated to DNS ops |
+| `Accept` / `format` | ❌ | Response format doesn't affect operation |
+
+**Important**: Upstream credentials are included in the cache key via SHA256 hash, ensuring:
+- Different users with different credentials get separate cache entries
+- User A's auth error (e.g., 403) won't affect User B with valid credentials
+- The hash is irreversible, no credential leakage risk
+
+#### Cache Lookup Flow
+
+When a request arrives, the system checks the cache in the following order:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Request Arrives                             │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+                ┌──────────────────────────────┐
+                │      Call cache.get()         │
+                └──────────────────────────────┘
+                               │
+                               ▼
+                ┌──────────────────────────────┐
+                │       Entry exists?           │
+                └──────────────────────────────┘
+                               │
+               ┌───────────────┴───────────────┐
+               │ No                             │ Yes
+               ▼                               ▼
+       ┌───────────────┐            ┌──────────────────┐
+       │  Return None  │            │   Entry expired?  │
+       │  (Cache miss) │            └──────────────────┘
+       └───────────────┘                       │
+                                ┌──────────────┴──────────────┐
+                                │ Yes                         │ No
+                                ▼                             ▼
+                        ┌───────────────┐          ┌──────────────────┐
+                        │ Delete entry  │          │   in_flight?     │
+                        │ Return None   │          └──────────────────┘
+                        └───────────────┘                     │
+                                               ┌──────────────┴──────────────┐
+                                               │ Yes                         │ No
+                                               ▼                             ▼
+                                       ┌───────────────┐          ┌──────────────────┐
+                                       │  Return None  │          │  ✅ Cache hit!    │
+                                       │ (In progress) │          │  Return result    │
+                                       └───────────────┘          └──────────────────┘
+```
+
+**Evaluation order** (sequential, not parallel):
+1. Entry exists? → No → Return None (cache miss)
+2. Entry expired? → Yes → Delete entry, return None
+3. in_flight? → Yes → Return None (another request is processing, wait for result)
+4. None of the above → ✅ Cache hit, return cached result (including error responses)
+
+#### Error Response Caching
+
+Error responses are also cached because:
+1. Upstream API calls include automatic retry for transient errors
+2. When an error finally returns, it's either a permanent error (invalid credentials, permission denied) or retries exhausted
+3. Since upstream credentials are in the cache key, cached errors won't affect other users
+
+## 9. Risk Notice
 
 Most of the source code in this project is AI-assisted generated, including but not limited to function implementation, code structure, and some documentation content.
 

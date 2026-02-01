@@ -11,7 +11,9 @@ from ddns_gateway.dedupe import (
     CachedResponseBase,
     DedupeCache,
     DedupeEntry,
+    compute_credential_hash,
     compute_dedupe_key,
+    create_cached_error_base,
 )
 
 # =============================================================================
@@ -364,29 +366,92 @@ class TestSingleflight:
     async def test_mark_in_flight_first_request(self):
         """Test first request successfully marks as leader."""
         cache = DedupeCache()
-        result = await cache.mark_in_flight("key1", lease_sec=60.0)
-        assert result is True
+        is_leader, generation = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader is True
+        assert generation == 1
 
     @pytest.mark.asyncio
     async def test_mark_in_flight_second_request_returns_false(self):
         """Test second request returns False (already in-flight)."""
         cache = DedupeCache()
         await cache.mark_in_flight("key1", lease_sec=60.0)
-        result = await cache.mark_in_flight("key1", lease_sec=60.0)
-        assert result is False
+        is_leader, generation = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader is False
+        assert generation == 0
 
     @pytest.mark.asyncio
     async def test_clear_in_flight(self):
-        """Test clearing in-flight flag."""
+        """Test clearing in-flight flag marks entry as aborted."""
         cache = DedupeCache()
         await cache.mark_in_flight("key1", lease_sec=60.0)
 
-        # Should clear in-flight
+        # Should mark as aborted (not delete)
         await cache.clear_in_flight("key1")
 
-        # Now we can mark again
-        result = await cache.mark_in_flight("key1", lease_sec=60.0)
-        assert result is True
+        # Entry still exists but marked as aborted
+        # get() should return None for aborted entries
+        entry = await cache.get("key1")
+        assert entry is None
+
+        # wait_for_result should return ABORTED
+        from ddns_gateway.dedupe import WaitResult
+
+        await cache.mark_in_flight("key2", lease_sec=60.0)
+        await cache.clear_in_flight("key2")
+
+        outcome = await cache.wait_for_result("key2", wait_timeout_sec=0.1)
+        assert outcome.status == WaitResult.ABORTED
+
+    @pytest.mark.asyncio
+    async def test_mark_in_flight_can_takeover_aborted_entry(self):
+        """Test that mark_in_flight can take over an aborted entry."""
+        cache = DedupeCache()
+
+        # First request becomes leader
+        is_leader1, gen1 = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader1 is True
+        assert gen1 == 1
+
+        # Leader aborts (emergency: no result cached)
+        await cache.clear_in_flight("key1")
+
+        # New request should be able to become leader (takeover)
+        is_leader2, gen2 = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader2 is True  # Can takeover aborted entry
+        assert gen2 == 2  # Generation incremented
+
+    @pytest.mark.asyncio
+    async def test_aborted_entry_allows_new_leader_to_succeed(
+        self, sample_base: CachedResponseBase
+    ):
+        """Test full flow: leader aborts, new leader succeeds and caches result."""
+        from ddns_gateway.dedupe import WaitResult
+
+        cache = DedupeCache()
+
+        # First leader marks in-flight
+        await cache.mark_in_flight("key1", lease_sec=60.0)
+
+        # First leader aborts without caching result
+        await cache.clear_in_flight("key1")
+
+        # Verify entry is aborted
+        entry = await cache.get("key1")
+        assert entry is None  # get() returns None for aborted
+
+        # New request can become leader
+        is_leader, gen = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader is True
+        assert gen == 2  # Generation incremented after abort
+
+        # New leader succeeds and caches result
+        await cache.set("key1", sample_base)
+
+        # Now get() should return the cached result
+        entry = await cache.get("key1")
+        assert entry is not None
+        assert entry.base == sample_base
+        assert entry.aborted is False
 
     @pytest.mark.asyncio
     async def test_set_clears_in_flight(self, sample_base: CachedResponseBase):
@@ -406,27 +471,35 @@ class TestSingleflight:
     @pytest.mark.asyncio
     async def test_wait_for_result_immediate(self, sample_base: CachedResponseBase):
         """Test wait returns immediately if result already exists."""
+        from ddns_gateway.dedupe import WaitResult
+
         cache = DedupeCache()
         await cache.set("key1", sample_base)
 
-        # Wait should return immediately
+        # Wait should return immediately with SUCCESS
         result = await cache.wait_for_result("key1", wait_timeout_sec=0.1)
-        assert result is not None
-        assert result.base == sample_base
+        assert result.status == WaitResult.COMPLETED
+        assert result.entry is not None
+        assert result.entry.base == sample_base
 
     @pytest.mark.asyncio
     async def test_wait_for_result_timeout(self):
-        """Test wait returns None on timeout."""
+        """Test wait returns TIMEOUT when leader is still processing."""
+        from ddns_gateway.dedupe import WaitResult
+
         cache = DedupeCache()
         await cache.mark_in_flight("key1", lease_sec=60.0)
 
         # Wait should timeout
         result = await cache.wait_for_result("key1", wait_timeout_sec=0.1)
-        assert result is None
+        assert result.status == WaitResult.TIMEOUT
+        assert result.entry is None
 
     @pytest.mark.asyncio
     async def test_wait_for_result_success(self, sample_base: CachedResponseBase):
         """Test wait returns result when set is called."""
+        from ddns_gateway.dedupe import WaitResult
+
         cache = DedupeCache()
         await cache.mark_in_flight("key1", lease_sec=60.0)
 
@@ -441,8 +514,9 @@ class TestSingleflight:
         results = await asyncio.gather(set_after_delay(), wait_for_it())
         wait_result = results[1]
 
-        assert wait_result is not None
-        assert wait_result.base == sample_base
+        assert wait_result.status == WaitResult.COMPLETED
+        assert wait_result.entry is not None
+        assert wait_result.entry.base == sample_base
 
     @pytest.mark.asyncio
     async def test_lease_expiration_allows_takeover(self):
@@ -456,8 +530,9 @@ class TestSingleflight:
         await asyncio.sleep(0.2)
 
         # Should be able to takeover
-        result = await cache.mark_in_flight("key1", lease_sec=60.0)
-        assert result is True
+        is_leader, gen = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader is True
+        assert gen == 2  # Generation incremented on takeover
 
     @pytest.mark.asyncio
     async def test_valid_cache_prevents_mark(self, sample_base: CachedResponseBase):
@@ -468,8 +543,9 @@ class TestSingleflight:
         await cache.set("key1", sample_base)
 
         # Should not be able to mark (cache hit)
-        result = await cache.mark_in_flight("key1", lease_sec=60.0)
-        assert result is False
+        is_leader, gen = await cache.mark_in_flight("key1", lease_sec=60.0)
+        assert is_leader is False
+        assert gen == 0
 
 
 # =============================================================================
@@ -698,3 +774,223 @@ class TestDedupeCacheInFlightAge:
 
         age = await cache.get_in_flight_age(key)
         assert age is None
+
+
+# =============================================================================
+# compute_credential_hash Tests
+# =============================================================================
+
+
+class TestComputeCredentialHash:
+    """Tests for compute_credential_hash function."""
+
+    def test_returns_none_for_none_credentials(self):
+        """Test that None credentials returns None hash."""
+        result = compute_credential_hash(None)
+        assert result is None
+
+    def test_returns_none_for_empty_credentials(self):
+        """Test that empty credentials dict returns None hash."""
+        result = compute_credential_hash({})
+        assert result is None
+
+    def test_returns_hash_for_valid_credentials(self):
+        """Test that valid credentials returns a SHA256 hash."""
+        creds = {"id": "test_id", "secret": "test_secret"}
+        result = compute_credential_hash(creds)
+        assert result is not None
+        assert len(result) == 64  # SHA256 hex digest is 64 chars
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_same_credentials_same_hash(self):
+        """Test that same credentials produce same hash."""
+        creds1 = {"id": "test_id", "secret": "test_secret"}
+        creds2 = {"id": "test_id", "secret": "test_secret"}
+        assert compute_credential_hash(creds1) == compute_credential_hash(creds2)
+
+    def test_different_credentials_different_hash(self):
+        """Test that different credentials produce different hashes."""
+        creds1 = {"id": "test_id", "secret": "secret1"}
+        creds2 = {"id": "test_id", "secret": "secret2"}
+        assert compute_credential_hash(creds1) != compute_credential_hash(creds2)
+
+    def test_key_order_does_not_matter(self):
+        """Test that key order in dict doesn't affect hash."""
+        creds1 = {"id": "test_id", "secret": "test_secret"}
+        creds2 = {"secret": "test_secret", "id": "test_id"}
+        assert compute_credential_hash(creds1) == compute_credential_hash(creds2)
+
+
+# =============================================================================
+# upstream_credential_hash in compute_dedupe_key Tests
+# =============================================================================
+
+
+class TestDedupeKeyWithCredentialHash:
+    """Tests for compute_dedupe_key with upstream_credential_hash parameter."""
+
+    def test_same_cred_hash_same_key(self):
+        """Test that same credential hash produces same dedupe key."""
+        key1 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash="abc123",
+        )
+        key2 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash="abc123",
+        )
+        assert key1 == key2
+
+    def test_different_cred_hash_different_key(self):
+        """Test that different credential hashes produce different dedupe keys."""
+        key1 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash="user_a_hash",
+        )
+        key2 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash="user_b_hash",
+        )
+        assert key1 != key2
+
+    def test_none_cred_hash_vs_some_cred_hash_different_key(self):
+        """Test that None credential hash differs from a hash value."""
+        key1 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash=None,
+        )
+        key2 = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash="some_hash",
+        )
+        assert key1 != key2
+
+
+# =============================================================================
+# create_cached_error_base Tests
+# =============================================================================
+
+
+class TestCreateCachedErrorBase:
+    """Tests for create_cached_error_base function."""
+
+    def test_creates_error_base(self):
+        """Test that create_cached_error_base creates a valid error base."""
+        error_base = create_cached_error_base(
+            error_code="UPSTREAM_AUTH_ERROR",
+            error_message="Authentication failed",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+        )
+
+        assert error_base.status == "error"
+        assert error_base.original_action == "error"
+        assert error_base.error_code == "UPSTREAM_AUTH_ERROR"
+        assert error_base.error_message == "Authentication failed"
+        assert error_base.provider == "cloudflare"
+        assert error_base.zone == "example.com"
+        assert error_base.record_type == "A"
+        assert error_base.record == "home"
+        assert error_base.value == ""
+        assert error_base.record_id is None
+        assert error_base.zone_id is None
+
+    def test_with_error_details(self):
+        """Test that error_details are properly converted to tuple."""
+        error_base = create_cached_error_base(
+            error_code="UPSTREAM_API_ERROR",
+            error_message="API error",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            error_details={"upstream_http_status": 500},
+        )
+
+        assert error_base.error_details is not None
+        # Tuple of sorted (key, value) pairs
+        assert ("upstream_http_status", 500) in error_base.error_details
+
+    def test_with_warnings(self):
+        """Test that warnings are properly stored."""
+        from ddns_gateway.models import WarningCode, WarningModel
+
+        warning = WarningModel(
+            code=WarningCode.PROXIED_IGNORED,
+            message="Proxied ignored",
+        )
+        error_base = create_cached_error_base(
+            error_code="UPSTREAM_API_ERROR",
+            error_message="API error",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            warnings=[warning],
+        )
+
+        assert len(error_base.warnings) == 1
+
+    def test_is_frozen(self):
+        """Test that created error base is immutable."""
+        error_base = create_cached_error_base(
+            error_code="UPSTREAM_AUTH_ERROR",
+            error_message="Auth failed",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+        )
+
+        with pytest.raises(AttributeError):
+            error_base.error_code = "NEW_ERROR"  # type: ignore[misc]

@@ -21,9 +21,12 @@ from typing import TYPE_CHECKING, Any
 from starlette import status as st_status
 
 from ddns_gateway.dedupe import (
+    WaitResult,
     build_dedupe_response_dict,
+    compute_credential_hash,
     compute_dedupe_key,
     create_cached_base,
+    create_cached_error_base,
 )
 from ddns_gateway.models import (
     DDNSResponse,
@@ -450,7 +453,11 @@ async def upsert_record_service(
     # Step 2-3: Dedupe cache check
     # -------------------------------------------------------------------------
     dedupe_key: str | None = None
+    credential_hash: str | None = None
     if dedupe_cache is not None:
+        # Compute credential hash for cache key isolation
+        credential_hash = compute_credential_hash(credentials)
+
         dedupe_key = compute_dedupe_key(
             operation="upsert",
             provider=provider,
@@ -461,6 +468,7 @@ async def upsert_record_service(
             ttl=norm_ttl,
             comment=norm_comment,
             proxied=proxied_validated,
+            upstream_credential_hash=credential_hash,
         )
 
         cached = await dedupe_cache.get(dedupe_key)
@@ -484,9 +492,10 @@ async def upsert_record_service(
     # Step 3.5: Singleflight - Become leader or wait for result
     # -------------------------------------------------------------------------
     is_leader = False
+    leader_generation = 0
     if dedupe_cache is not None and dedupe_config is not None and dedupe_key:
         # Try to become leader (mark as in-flight)
-        is_leader = await dedupe_cache.mark_in_flight(
+        is_leader, leader_generation = await dedupe_cache.mark_in_flight(
             dedupe_key,
             lease_sec=dedupe_config.singleflight_lease_sec,
         )
@@ -497,14 +506,19 @@ async def upsert_record_service(
                 '[upsert] Singleflight waiting: "%s" ...',
                 dedupe_key[:16],
             )
-            sf_result = await dedupe_cache.wait_for_result(
+            wait_outcome = await dedupe_cache.wait_for_result(
                 dedupe_key,
                 wait_timeout_sec=dedupe_config.singleflight_wait_timeout_sec,
             )
-            if sf_result is not None and sf_result.base is not None:
-                # Leader completed, use their result
+
+            if wait_outcome.status == WaitResult.COMPLETED:
+                # Leader completed, use their result (SUCCESS always has entry)
+                entry = wait_outcome.entry
+                if entry is None:
+                    msg = "invariant: wait_for_result(SUCCESS) must have entry"
+                    raise RuntimeError(msg)
                 resp_dict = build_dedupe_response_dict(
-                    sf_result,
+                    entry,
                     dedupe_cache.window_seconds,
                 )
                 return DDNSResponse.from_dedupe_dict(
@@ -516,7 +530,28 @@ async def upsert_record_service(
                     normalized=normalized,
                 )
 
-            # Wait timeout - return error (DO NOT retry)
+            if wait_outcome.status == WaitResult.ABORTED:
+                # Leader failed - return error, client can retry immediately
+                logger.warning(
+                    '[upsert] Singleflight leader failed: "%s" ...',
+                    dedupe_key[:16],
+                )
+                return DDNSResponse.error(
+                    errors=ErrorModel(
+                        code=ErrorCode.SINGLEFLIGHT_LEADER_FAILED,
+                        message="Another request was processing but failed.",
+                    ),
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record_name=norm_record,
+                    warnings=warnings,
+                    include_debug_info=include_debug_info,
+                    raw_input=raw_input,
+                    normalized=normalized,
+                )
+
+            # TIMEOUT - return error (DO NOT retry until retry_after_sec)
             logger.warning(
                 '[upsert] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
@@ -596,9 +631,18 @@ async def upsert_record_service(
             '[upsert] Missing credentials for find_record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS.value,
+                error_message=str(e),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             errors=ErrorModel(
                 code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
@@ -619,9 +663,18 @@ async def upsert_record_service(
             '[upsert] Failed to query existing record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.UPSTREAM_API_ERROR.value,
+                error_message=f"Failed to query existing record: {e}",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             errors=ErrorModel(
                 code=ErrorCode.UPSTREAM_API_ERROR,
@@ -658,11 +711,23 @@ async def upsert_record_service(
                 else existing.error_messages
             ),
         )
-        # Clear singleflight so waiters get notified
-        if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+        # Cache error response so subsequent identical requests get cached error
         error_code = _map_upstream_error(existing, provider)
         error_message = _get_upstream_error_message(error_code)
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            error_base = create_cached_error_base(
+                error_code=error_code.value,
+                error_message=error_message,
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error_details={"upstream_http_status": existing.http_status}
+                if existing.http_status
+                else None,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             errors=ErrorModel(
                 code=error_code,
@@ -718,9 +783,18 @@ async def upsert_record_service(
                 '[upsert] Missing credentials for create_record: "%s".',
                 e,
             )
-            # Clear singleflight so waiters get notified
+            # Cache error response so subsequent identical requests get cached error
             if dedupe_cache is not None and is_leader and dedupe_key:
-                await dedupe_cache.clear_in_flight(dedupe_key)
+                error_base = create_cached_error_base(
+                    error_code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS.value,
+                    error_message=str(e),
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    warnings=warnings,
+                )
+                await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
             return DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS,
@@ -741,9 +815,18 @@ async def upsert_record_service(
                 '[upsert] Failed to create record: "%s".',
                 e,
             )
-            # Clear singleflight so waiters get notified
+            # Cache error response so subsequent identical requests get cached error
             if dedupe_cache is not None and is_leader and dedupe_key:
-                await dedupe_cache.clear_in_flight(dedupe_key)
+                error_base = create_cached_error_base(
+                    error_code=ErrorCode.UPSTREAM_API_ERROR.value,
+                    error_message=f"Failed to create record: {e}",
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    warnings=warnings,
+                )
+                await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
             return DDNSResponse.error(
                 errors=ErrorModel(
                     code=ErrorCode.UPSTREAM_API_ERROR,
@@ -761,10 +844,6 @@ async def upsert_record_service(
             )
 
         if not result.success:
-            # Clear singleflight so waiters get notified
-            if dedupe_cache is not None and is_leader and dedupe_key:
-                await dedupe_cache.clear_in_flight(dedupe_key)
-
             # Determine error code based on error_detail if available
             if result.error_detail is not None:
                 error_code = _map_upstream_error(result.error_detail, provider)
@@ -791,6 +870,20 @@ async def upsert_record_service(
                 error_message = result.message
                 error_details = None
                 extra_debug = None
+
+            # Cache error response so subsequent identical requests get cached error
+            if dedupe_cache is not None and is_leader and dedupe_key:
+                error_base = create_cached_error_base(
+                    error_code=error_code.value,
+                    error_message=error_message,
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record=norm_record,
+                    error_details=error_details,
+                    warnings=warnings + (result.warnings or []),
+                )
+                await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
 
             return DDNSResponse.error(
                 provider=provider,
@@ -830,6 +923,7 @@ async def upsert_record_service(
                     previous_value=None,
                     warnings=warnings + (result.warnings or []),
                 ),
+                generation=leader_generation if is_leader else None,
             )
 
         combined_warnings = warnings + (result.warnings or [])
@@ -893,6 +987,7 @@ async def upsert_record_service(
                     previous_value=None,
                     warnings=warnings,
                 ),
+                generation=leader_generation if is_leader else None,
             )
 
         return DDNSResponse.success(
@@ -932,9 +1027,18 @@ async def upsert_record_service(
             '[upsert] Missing credentials for update_record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS.value,
+                error_message=str(e),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -955,9 +1059,18 @@ async def upsert_record_service(
             '[upsert] Failed to update record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.UPSTREAM_API_ERROR.value,
+                error_message=f"Failed to update record: {e}",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -975,10 +1088,6 @@ async def upsert_record_service(
         )
 
     if not result.success:
-        # Clear singleflight so waiters get notified
-        if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
-
         # Determine error code based on error_detail if available
         if result.error_detail is not None:
             error_code = _map_upstream_error(result.error_detail, provider)
@@ -1005,6 +1114,20 @@ async def upsert_record_service(
             error_message = result.message
             err_details = None
             dbg_extra = None
+
+        # Cache error response so subsequent identical requests get cached error
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            error_base = create_cached_error_base(
+                error_code=error_code.value,
+                error_message=error_message,
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error_details=err_details,
+                warnings=warnings + (result.warnings or []),
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
 
         return DDNSResponse.error(
             provider=provider,
@@ -1053,6 +1176,7 @@ async def upsert_record_service(
                 previous_value=existing_value if value_changed else None,
                 warnings=warnings + (result.warnings or []),
             ),
+            generation=leader_generation if is_leader else None,
         )
 
     combined_warnings = warnings + (result.warnings or [])
@@ -1217,7 +1341,11 @@ async def delete_record_service(
     # Step 2-3: Dedupe cache check
     # -------------------------------------------------------------------------
     dedupe_key: str | None = None
+    credential_hash: str | None = None
     if dedupe_cache is not None:
+        # Compute credential hash for cache key isolation
+        credential_hash = compute_credential_hash(credentials)
+
         dedupe_key = compute_dedupe_key(
             operation="delete",
             provider=provider,
@@ -1228,6 +1356,7 @@ async def delete_record_service(
             ttl=None,  # DELETE: no ttl
             comment=None,  # DELETE: no comment
             proxied=None,  # DELETE: no proxied
+            upstream_credential_hash=credential_hash,
         )
 
         cached = await dedupe_cache.get(dedupe_key)
@@ -1249,9 +1378,10 @@ async def delete_record_service(
     # Step 3.5: Singleflight - Become leader or wait for result
     # -------------------------------------------------------------------------
     is_leader = False
+    leader_generation = 0
     if dedupe_cache is not None and dedupe_config is not None and dedupe_key:
         # Try to become leader (mark as in-flight)
-        is_leader = await dedupe_cache.mark_in_flight(
+        is_leader, leader_generation = await dedupe_cache.mark_in_flight(
             dedupe_key,
             lease_sec=dedupe_config.singleflight_lease_sec,
         )
@@ -1262,14 +1392,19 @@ async def delete_record_service(
                 '[delete] Singleflight waiting: "%s" ...',
                 dedupe_key[:16],
             )
-            sf_result = await dedupe_cache.wait_for_result(
+            wait_outcome = await dedupe_cache.wait_for_result(
                 dedupe_key,
                 wait_timeout_sec=dedupe_config.singleflight_wait_timeout_sec,
             )
-            if sf_result is not None and sf_result.base is not None:
-                # Leader completed, use their result
+
+            if wait_outcome.status == WaitResult.COMPLETED:
+                # Leader completed, use their result (SUCCESS always has entry)
+                entry = wait_outcome.entry
+                if entry is None:
+                    msg = "Invariant: wait_for_result(SUCCESS) must have entry"
+                    raise RuntimeError(msg)
                 resp_dict = build_dedupe_response_dict(
-                    sf_result,
+                    entry,
                     dedupe_cache.window_seconds,
                 )
                 return DDNSResponse.from_dedupe_dict(
@@ -1280,7 +1415,27 @@ async def delete_record_service(
                     normalized=normalized,
                 )
 
-            # Wait timeout - return error (DO NOT retry)
+            if wait_outcome.status == WaitResult.ABORTED:
+                # Leader failed - return error, client can retry immediately
+                logger.warning(
+                    '[delete] Singleflight leader failed: "%s" ...',
+                    dedupe_key[:16],
+                )
+                return DDNSResponse.error(
+                    errors=ErrorModel(
+                        code=ErrorCode.SINGLEFLIGHT_LEADER_FAILED,
+                        message="Another request was processing but failed.",
+                    ),
+                    provider=provider,
+                    zone=norm_zone,
+                    record_type=record_type_enum.value,
+                    record_name=norm_record,
+                    include_debug_info=include_debug_info,
+                    raw_input=raw_input,
+                    normalized=normalized,
+                )
+
+            # TIMEOUT - return error (DO NOT retry until retry_after_sec)
             logger.warning(
                 '[delete] Singleflight wait timeout: "%s" ...',
                 dedupe_key[:16],
@@ -1358,9 +1513,17 @@ async def delete_record_service(
             '[delete] Missing credentials for find_record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS.value,
+                error_message=str(e),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -1380,9 +1543,17 @@ async def delete_record_service(
             '[delete] Failed to query existing record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.UPSTREAM_API_ERROR.value,
+                error_message=f"Failed to query existing record: {e}",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -1418,11 +1589,23 @@ async def delete_record_service(
                 else existing.error_messages
             ),
         )
-        # Clear singleflight so waiters get notified
-        if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+        # Cache error response so subsequent identical requests get cached error
         error_code = _map_upstream_error(existing, provider)
         error_message = _get_upstream_error_message(error_code)
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            error_base = create_cached_error_base(
+                error_code=error_code.value,
+                error_message=error_message,
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error_details={"upstream_http_status": existing.http_status}
+                if existing.http_status
+                else None,
+                warnings=warnings,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             errors=ErrorModel(
                 code=error_code,
@@ -1482,6 +1665,7 @@ async def delete_record_service(
                     previous_value=None,
                     warnings=warnings,
                 ),
+                generation=leader_generation if is_leader else None,
             )
         return DDNSResponse.success(
             action="unchanged",
@@ -1511,9 +1695,17 @@ async def delete_record_service(
             '[delete] Missing credentials for delete_record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.MISSING_UPSTREAM_CREDENTIALS.value,
+                error_message=str(e),
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -1533,9 +1725,17 @@ async def delete_record_service(
             '[delete] Failed to delete record: "%s".',
             e,
         )
-        # Clear singleflight so waiters get notified
+        # Cache error response so subsequent identical requests get cached error
         if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
+            error_base = create_cached_error_base(
+                error_code=ErrorCode.UPSTREAM_API_ERROR.value,
+                error_message=f"Failed to delete record: {e}",
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
         return DDNSResponse.error(
             provider=provider,
             zone=norm_zone,
@@ -1552,10 +1752,6 @@ async def delete_record_service(
         )
 
     if not result.success:
-        # Clear singleflight so waiters get notified
-        if dedupe_cache is not None and is_leader and dedupe_key:
-            await dedupe_cache.clear_in_flight(dedupe_key)
-
         # Determine error code based on error_detail if available
         if result.error_detail is not None:
             error_code = _map_upstream_error(result.error_detail, provider)
@@ -1582,6 +1778,20 @@ async def delete_record_service(
             error_message = result.message
             error_details = None
             extra_debug = None
+
+        # Cache error response so subsequent identical requests get cached error
+        if dedupe_cache is not None and is_leader and dedupe_key:
+            error_base = create_cached_error_base(
+                error_code=error_code.value,
+                error_message=error_message,
+                provider=provider,
+                zone=norm_zone,
+                record_type=record_type_enum.value,
+                record=norm_record,
+                error_details=error_details,
+                warnings=result.warnings or [],
+            )
+            await dedupe_cache.set(dedupe_key, error_base, generation=leader_generation)
 
         return DDNSResponse.error(
             provider=provider,
@@ -1621,6 +1831,7 @@ async def delete_record_service(
                 previous_value=None,
                 warnings=result.warnings or [],
             ),
+            generation=leader_generation if is_leader else None,
         )
 
     return DDNSResponse.success(

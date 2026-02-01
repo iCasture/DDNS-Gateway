@@ -157,6 +157,8 @@ class ErrorCode(StrEnum):
         Internal server error.
     SINGLEFLIGHT_WAIT_TIMEOUT : str
         Singleflight wait timeout - another request is in progress.
+    SINGLEFLIGHT_LEADER_FAILED : str
+        Singleflight leader failed - another request was processing but failed.
     """
 
     # Validation errors
@@ -188,6 +190,7 @@ class ErrorCode(StrEnum):
 
     # Singleflight errors
     SINGLEFLIGHT_WAIT_TIMEOUT = "SINGLEFLIGHT_WAIT_TIMEOUT"
+    SINGLEFLIGHT_LEADER_FAILED = "SINGLEFLIGHT_LEADER_FAILED"
 
 
 # =============================================================================
@@ -217,10 +220,11 @@ ERROR_STATUS_MAP: dict[str, int] = {
     ErrorCode.MULTIPLE_RECORDS_FOUND: st_status.HTTP_409_CONFLICT,
     # 500 Internal Server Error
     ErrorCode.INTERNAL_ERROR: st_status.HTTP_500_INTERNAL_SERVER_ERROR,
-    # 502 Bad Gateway - Upstream API error
+    # 502 Bad Gateway - Upstream API error / Singleflight leader failed
     ErrorCode.UPSTREAM_API_ERROR: st_status.HTTP_502_BAD_GATEWAY,
     ErrorCode.UPSTREAM_AUTH_ERROR: st_status.HTTP_502_BAD_GATEWAY,
     ErrorCode.UPSTREAM_RATE_LIMITED: st_status.HTTP_502_BAD_GATEWAY,
+    ErrorCode.SINGLEFLIGHT_LEADER_FAILED: st_status.HTTP_502_BAD_GATEWAY,
     # 504 Gateway Timeout - Singleflight wait timeout
     ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT: st_status.HTTP_504_GATEWAY_TIMEOUT,
 }

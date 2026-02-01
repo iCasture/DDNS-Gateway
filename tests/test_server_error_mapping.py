@@ -48,6 +48,7 @@ class TestErrorResponses:
             (ErrorCode.MULTIPLE_RECORDS_FOUND, st_status.HTTP_409_CONFLICT),
             (ErrorCode.INTERNAL_ERROR, st_status.HTTP_500_INTERNAL_SERVER_ERROR),
             (ErrorCode.UPSTREAM_API_ERROR, st_status.HTTP_502_BAD_GATEWAY),
+            (ErrorCode.SINGLEFLIGHT_LEADER_FAILED, st_status.HTTP_502_BAD_GATEWAY),
             (ErrorCode.SINGLEFLIGHT_WAIT_TIMEOUT, st_status.HTTP_504_GATEWAY_TIMEOUT),
             ("UNKNOWN_ERROR", st_status.HTTP_400_BAD_REQUEST),  # Default case
         ],
