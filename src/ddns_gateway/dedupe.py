@@ -4,6 +4,51 @@ Dedupe cache module for DDNS Gateway.
 This module provides request deduplication caching to avoid redundant
 upstream API calls for identical requests within a configurable time window.
 
+Cache Key vs Cache Value
+------------------------
+The cache key determines whether two requests are considered "the same request",
+while the cache value stores the response data to return for cache hits.
+
+**Cache Key** (computed by `compute_dedupe_key()`):
+- Includes all fields that differentiate requests
+- Can include hashed sensitive data (SHA256 is irreversible)
+- Fields: operation, provider, zone, record_type, record, value, ttl,
+  comment, proxied, upstream_credential_hash
+
+**Cache Value** (`CachedResponseBase`):
+- Stores immutable response data for cache hits
+- MUST NOT contain any sensitive information (credentials, tokens)
+- Safe to return to any user with the same cache key
+
+Fields That Participate in Cache Key
+------------------------------------
+| Field                      | In Key | Reason                                |
+|----------------------------|--------|---------------------------------------|
+| operation                  | Yes    | Separates upsert/delete               |
+| provider                   | Yes    | Different providers                   |
+| zone                       | Yes    | Different domains                     |
+| record_type                | Yes    | Different record types                |
+| record                     | Yes    | Different record names                |
+| value                      | Yes    | Different values                      |
+| ttl                        | Yes    | Different TTLs                        |
+| comment                    | Yes    | Different comments                    |
+| proxied                    | Yes    | Cloudflare proxy status               |
+| upstream_credential_hash   | Yes    | Different credentials -> separate cache |
+| gateway_token              | No     | Gateway auth unrelated to DNS ops     |
+| Accept / format            | No     | Response format doesn't affect op     |
+
+Upstream Credential Security
+----------------------------
+Upstream credentials participate in cache key via SHA256 hash:
+1. The hash is irreversible, no credential leakage risk
+2. Cache value (`CachedResponseBase`) stores NO credential info
+3. Response (`DDNSResponse`) returns NO credential info
+
+This ensures that:
+- Users with different credentials get separate cache entries
+- A user's cached error (e.g., 403) won't affect another user
+- Credentials are never exposed through cache
+
 Cache Pollution Warning
 -----------------------
 The cache stores immutable `CachedResponseBase` objects. When building
@@ -39,13 +84,61 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
+from typing import overload
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Enums
+# =============================================================================
+
+
+class WaitResult(Enum):
+    """
+    Result status from waiting for a singleflight leader.
+
+    Attributes
+    ----------
+    COMPLETED : str
+        Leader completed and cached a result. The result is available
+        in the entry. Note: This indicates the leader finished processing,
+        regardless of whether the upstream call succeeded or failed.
+        Both success and error responses are cached and returned.
+    TIMEOUT : str
+        Wait timeout exceeded, leader is still processing.
+    ABORTED : str
+        Leader aborted without caching any result. This is rare and only
+        happens in emergency situations (e.g., process shutdown, cache
+        corruption recovery). Normally, errors are cached via set().
+    """
+
+    COMPLETED = "completed"
+    TIMEOUT = "timeout"
+    ABORTED = "aborted"
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
+
+
+@dataclass(slots=True)
+class WaitForResultOutcome:
+    """
+    Outcome of waiting for a singleflight result.
+
+    Attributes
+    ----------
+    status : WaitResult
+        The result status (COMPLETED, TIMEOUT, or ABORTED).
+    entry : DedupeEntry | None
+        The cache entry if status is COMPLETED, None otherwise.
+    """
+
+    status: WaitResult
+    entry: DedupeEntry | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -55,6 +148,10 @@ class CachedResponseBase:
 
     Contains all stable response fields that don't change between cache hits.
     Frozen to prevent accidental mutation.
+
+    This class supports both success and error responses:
+    - For success: status="success", error_* fields are None
+    - For error: status="error", error_code and error_message are set
 
     When responding to a cache hit, override:
     - action -> "deduped" (not original_action)
@@ -70,7 +167,8 @@ class CachedResponseBase:
     status : str
         Response status: "success" or "error".
     original_action : str
-        The original action from upstream: "created", "updated", "unchanged", "deleted".
+        The original action from upstream: "created", "updated", "unchanged",
+        "deleted", or "error" for error responses.
     provider : str
         Provider name (lowercase).
     zone : str
@@ -95,11 +193,17 @@ class CachedResponseBase:
         Previous value if this was an update.
     warnings : tuple
         Warnings from upstream call (tuple for immutability).
+    error_code : str | None
+        Error code for error responses (e.g., "UPSTREAM_AUTH_ERROR").
+    error_message : str | None
+        Error message for error responses.
+    error_details : tuple | None
+        Additional error details as tuple of (key, value) pairs for immutability.
     """
 
     # Response status
     status: str  # "success" | "error"
-    original_action: str  # "created" | "updated" | "unchanged" | "deleted"
+    original_action: str  # "created" | "updated" | "unchanged" | "deleted" | "error"
 
     # Record identity
     provider: str
@@ -120,6 +224,11 @@ class CachedResponseBase:
 
     # Warnings from upstream (immutable tuple)
     warnings: tuple = field(default_factory=tuple)  # type: ignore[assignment]
+
+    # Error information (only set for error responses)
+    error_code: str | None = None
+    error_message: str | None = None
+    error_details: tuple | None = None  # tuple of (key, value) pairs
 
 
 @dataclass(slots=True)
@@ -142,6 +251,17 @@ class DedupeEntry:
         Flag for Singleflight. True = request in progress.
     in_flight_started_at : float | None
         Timestamp when in_flight was set. Used for lease expiration.
+    aborted : bool
+        Flag indicating the leader aborted without caching a result.
+        Set by clear_in_flight() (emergency use only - normally errors
+        should be cached via set()). When True:
+        - get() returns None (treat as cache miss)
+        - mark_in_flight() allows takeover (new leader can retry)
+        - wait_for_result() returns ABORTED status
+    generation : int
+        Generation counter for singleflight takeover protection. Incremented
+        each time a new leader takes over. Used to prevent stale leaders from
+        overwriting newer results after a takeover.
     _event : asyncio.Event | None
         Event for waiters to wait on. Set when result is ready.
     """
@@ -153,6 +273,10 @@ class DedupeEntry:
     in_flight: bool = False
     in_flight_started_at: float | None = None
     lease_sec: float | None = None  # Original lease duration for this entry
+    aborted: bool = (
+        False  # True if leader aborted without caching result (emergency use only)
+    )
+    generation: int = 0  # Generation counter for takeover protection
     _event: asyncio.Event | None = field(default=None, repr=False)
 
 
@@ -220,6 +344,7 @@ class DedupeCache:
         - Returns None if entry doesn't exist
         - Returns None if entry is expired (beyond window_seconds)
         - Returns None if entry is in-flight (Stage 4.2)
+        - Returns None if entry has aborted=True
         - Moves accessed entry to end (LRU behavior)
         """
         async with self._lock:
@@ -244,6 +369,11 @@ class DedupeCache:
                 logger.debug('[dedupe] Entry in-flight: "%s" ...', key_hash[:16])
                 return None
 
+            # Skip aborted entries (treat as if not cached)
+            if entry.aborted:
+                logger.debug('[dedupe] Entry aborted: "%s" ...', key_hash[:16])
+                return None
+
             # LRU: move to end
             self._entries.move_to_end(key_hash)
 
@@ -258,11 +388,28 @@ class DedupeCache:
             )
             return entry
 
+    @overload
     async def set(
         self,
         key_hash: str,
         base: CachedResponseBase,
-    ) -> DedupeEntry:
+        generation: None = None,
+    ) -> DedupeEntry: ...
+
+    @overload
+    async def set(
+        self,
+        key_hash: str,
+        base: CachedResponseBase,
+        generation: int,
+    ) -> DedupeEntry | None: ...
+
+    async def set(
+        self,
+        key_hash: str,
+        base: CachedResponseBase,
+        generation: int | None = None,
+    ) -> DedupeEntry | None:
         """
         Set an entry in cache.
 
@@ -272,11 +419,17 @@ class DedupeCache:
             The dedupe key hash.
         base : CachedResponseBase
             The immutable response base to cache.
+        generation : int | None
+            If provided, only set if current entry's generation matches.
+            This prevents stale leaders from overwriting newer results.
+            When None (default), always succeeds (for backwards compatibility).
 
         Returns
         -------
-        DedupeEntry
-            The newly created entry.
+        DedupeEntry | None
+            The newly created entry if set successfully.
+            None only when generation is provided and doesn't match
+            (stale leader rejected).
 
         Notes
         -----
@@ -289,10 +442,30 @@ class DedupeCache:
         async with self._lock:
             now = time.time()
 
-            # Grab event from existing in-flight entry (if any)
+            # Grab existing entry for generation check and event
             existing = self._entries.get(key_hash)
+
+            # Generation validation (only when generation is provided)
+            if (
+                generation is not None
+                and existing is not None
+                and existing.generation != generation
+            ):
+                # Stale leader trying to overwrite newer leader's result, reject
+                logger.debug(
+                    '[dedupe] Stale leader rejected: "%s" (gen %d != %d) ...',
+                    key_hash[:16],
+                    generation,
+                    existing.generation,
+                )
+                return None
+
+            # Grab event from existing in-flight entry (if any)
             if existing is not None and existing.in_flight:
                 event_to_set = existing._event  # noqa: SLF001
+
+            # Preserve generation from existing entry (if same-gen leader completing)
+            new_generation = existing.generation if existing else 0
 
             entry = DedupeEntry(
                 key_hash=key_hash,
@@ -300,6 +473,7 @@ class DedupeCache:
                 base=base,
                 in_flight=False,
                 in_flight_started_at=None,
+                generation=new_generation,
                 _event=None,
             )
 
@@ -410,7 +584,7 @@ class DedupeCache:
         self,
         key_hash: str,
         lease_sec: float = 60.0,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         """
         Mark a key as in-flight (this request is the leader).
 
@@ -427,9 +601,9 @@ class DedupeCache:
 
         Returns
         -------
-        bool
-            True if successfully marked as leader.
-            False if already in-flight by another leader (should wait).
+        tuple[bool, int]
+            (True, generation) if successfully marked as leader.
+            (False, 0) if already in-flight by another leader (should wait).
         """
         async with self._lock:
             entry = self._entries.get(key_hash)
@@ -444,7 +618,7 @@ class DedupeCache:
                 ):
                     age = now - entry.in_flight_started_at
                     if age < entry.lease_sec:
-                        return False  # Lease still valid, cannot takeover
+                        return (False, 0)  # Lease still valid, cannot takeover
                     # Lease expired, allow takeover
                     logger.debug(
                         '[dedupe] Lease expired for "%s" (Age: "%.1fs" > "%.1fs"), takeover ...',
@@ -452,14 +626,29 @@ class DedupeCache:
                         age,
                         lease_sec,
                     )
+                    # Notify old waiters so they can wake up and check the new state
+                    old_event = entry._event  # noqa: SLF001
+                    if old_event is not None:
+                        old_event.set()
                 else:
                     # Fallback: no timestamp, check by entry timestamp
-                    return False
+                    return (False, 0)
 
-            # Case 2: Valid cache exists (not expired)
+            # Case 2: Valid cache exists (not expired, not aborted)
             if entry is not None and not entry.in_flight:
-                if now - entry.timestamp <= self._window_seconds:
-                    return False  # Cache hit, no need to be leader
+                # aborted entries should be treated as takeover-able
+                # (the previous leader aborted and cached no result)
+                if entry.aborted:
+                    logger.debug(
+                        '[dedupe] Entry aborted, allowing takeover: "%s" ...',
+                        key_hash[:16],
+                    )
+                    # Fall through to create new in-flight entry
+                elif now - entry.timestamp <= self._window_seconds:
+                    return (False, 0)  # Cache hit, no need to be leader
+
+            # Calculate new generation (increment from existing, or start at 1)
+            new_generation = (entry.generation + 1) if entry else 1
 
             # Create in-flight placeholder
             event = asyncio.Event()
@@ -470,18 +659,38 @@ class DedupeCache:
                 in_flight=True,
                 in_flight_started_at=now,
                 lease_sec=lease_sec,  # Record lease for takeover check
+                generation=new_generation,
                 _event=event,
             )
             self._entries.move_to_end(key_hash)
-            logger.debug('[dedupe] Marked in-flight: "%s" ...', key_hash[:16])
-            return True
+            logger.debug(
+                '[dedupe] Marked in-flight: "%s" (gen=%d) ...',
+                key_hash[:16],
+                new_generation,
+            )
+            return (True, new_generation)
 
     async def clear_in_flight(self, key_hash: str) -> None:
         """
-        Clear the in-flight flag without storing a result.
+        Clear the in-flight flag without storing a result (emergency use only).
 
-        Use when the leader request failed and there's no result to cache.
-        All waiters will be notified and will get None from wait_for_result.
+        .. warning::
+
+            In normal operation, you should NOT use this method. Instead, always
+            cache error results using ``set()`` with ``create_cached_error_base()``.
+            This ensures that subsequent identical requests receive the cached error
+            instead of retrying (which would also fail).
+
+        This method is reserved for exceptional cases where caching any result is
+        impossible or undesirable, such as:
+
+        - Graceful shutdown: clearing in-flight entries before process exit
+        - Cache corruption recovery: resetting broken entries
+        - Testing: simulating edge cases
+
+        When called, it marks the entry as ``aborted=True``. Waiters will
+        receive ``WaitResult.ABORTED``, and subsequent ``mark_in_flight()``
+        calls can take over as leader.
 
         Parameters
         ----------
@@ -496,10 +705,12 @@ class DedupeCache:
                 return
 
             event_to_set = entry._event  # noqa: SLF001
-            del self._entries[key_hash]
-            logger.debug('[dedupe] Cleared in-flight: "%s" ...', key_hash[:16])
+            # Mark as aborted instead of deleting
+            entry.in_flight = False
+            entry.aborted = True
+            logger.debug('[dedupe] Marked aborted: "%s" ...', key_hash[:16])
 
-        # Notify waiters AFTER releasing lock (they'll get None)
+        # Notify waiters AFTER releasing lock (they'll see aborted=True)
         if event_to_set is not None:
             event_to_set.set()
 
@@ -527,12 +738,15 @@ class DedupeCache:
         self,
         key_hash: str,
         wait_timeout_sec: float = 30.0,
-    ) -> DedupeEntry | None:
+    ) -> WaitForResultOutcome:
         """
         Wait for an in-flight request to complete.
 
-        Returns the result if it becomes available within the timeout.
-        Returns None on timeout - the caller should return an error, NOT retry.
+        Returns a WaitForResultOutcome indicating:
+        - COMPLETED: Leader completed, entry contains the result
+        - TIMEOUT: Wait timeout exceeded, leader is still processing
+        - ABORTED: Leader aborted without caching a result (via clear_in_flight),
+                   or a takeover occurred and the new leader hasn't completed yet
 
         Parameters
         ----------
@@ -543,25 +757,32 @@ class DedupeCache:
 
         Returns
         -------
-        DedupeEntry | None
-            The result entry if available, None on timeout or failure.
+        WaitForResultOutcome
+            The outcome with status and optional entry.
         """
-        # Get event under lock
+        # Get event and initial generation under lock
         event: asyncio.Event | None = None
+        initial_generation: int = 0
         async with self._lock:
             entry = self._entries.get(key_hash)
             if entry is None:
-                return None
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
             if not entry.in_flight:
                 # Already ready (race condition - result arrived)
                 now = time.time()
                 if now - entry.timestamp <= self._window_seconds and entry.base:
-                    return entry
-                return None
+                    return WaitForResultOutcome(
+                        status=WaitResult.COMPLETED, entry=entry
+                    )
+                # Entry exists but no valid base - check if leader aborted
+                if entry.aborted:
+                    return WaitForResultOutcome(status=WaitResult.ABORTED)
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
+            initial_generation = entry.generation
             event = entry._event  # noqa: SLF001
 
         if event is None:
-            return None
+            return WaitForResultOutcome(status=WaitResult.ABORTED)
 
         # Wait outside lock to avoid deadlock
         try:
@@ -572,15 +793,41 @@ class DedupeCache:
                 key_hash[:16],
                 wait_timeout_sec,
             )
-            return None
+            return WaitForResultOutcome(status=WaitResult.TIMEOUT)
 
         # Re-check for result after event is set
         async with self._lock:
             entry = self._entries.get(key_hash)
-            if entry is None or entry.in_flight or entry.base is None:
-                return None
+            if entry is None:
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
+
+            # Check if generation changed (takeover occurred)
+            if entry.generation != initial_generation:
+                # Leader was taken over. Check if new leader has completed.
+                logger.debug(
+                    '[dedupe] Generation changed for "%s" (gen %d -> %d) ...',
+                    key_hash[:16],
+                    initial_generation,
+                    entry.generation,
+                )
+                if entry.base and not entry.in_flight and not entry.aborted:
+                    # New leader completed, return their result
+                    return WaitForResultOutcome(
+                        status=WaitResult.COMPLETED, entry=entry
+                    )
+                # New leader still processing or failed
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
+
+            # Check if leader aborted
+            if entry.aborted:
+                logger.debug('[dedupe] Leader aborted for "%s" ...', key_hash[:16])
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
+
+            if entry.in_flight or entry.base is None:
+                return WaitForResultOutcome(status=WaitResult.ABORTED)
+
             logger.debug('[dedupe] Wait succeeded for "%s" ...', key_hash[:16])
-            return entry
+            return WaitForResultOutcome(status=WaitResult.COMPLETED, entry=entry)
 
     # =========================================================================
     # Persistence Interface (Stage 4.3 - Placeholder)
@@ -668,6 +915,7 @@ def compute_dedupe_key(
     ttl: int | None,
     comment: str | None,
     proxied: bool | None,  # noqa: FBT001
+    upstream_credential_hash: str | None = None,
 ) -> str:
     """
     Compute SHA256 hash of canonical request for deduplication.
@@ -692,6 +940,11 @@ def compute_dedupe_key(
         Comment (normalized). None for delete operations.
     proxied : bool | None
         Proxied status (Cloudflare only). None for delete or non-CF.
+    upstream_credential_hash : str | None
+        SHA256 hash of upstream credentials. Used to separate cache entries
+        for different users with different credentials. This ensures:
+        - User A's success won't be returned to User B with different creds
+        - User A's auth error (403) won't block User B with valid creds
 
     Returns
     -------
@@ -705,6 +958,9 @@ def compute_dedupe_key(
     - format/Accept header do NOT participate in key calculation
     - For DELETE: value/ttl/comment/proxied should all be None
     - `proxied` should be None for non-Cloudflare or TXT records.
+    - `upstream_credential_hash` should be computed by the caller using
+      SHA256 hash of the credentials dict (JSON-serialized, sorted keys).
+      The hash is irreversible, ensuring no credential leakage.
     """
     canonical = {
         "op": operation,
@@ -716,6 +972,7 @@ def compute_dedupe_key(
         "ttl": ttl,
         "comment": comment,
         "proxied": proxied,
+        "cred_hash": upstream_credential_hash,
     }
     canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode()).hexdigest()
@@ -732,6 +989,10 @@ def build_dedupe_response_dict(
     - action -> "deduped"
     - upstream_called -> False (no upstream call, served from cache)
     - meta -> fresh (new request_id, timestamp, dedupe.hit=True)
+
+    Supports both success and error responses:
+    - For success: builds full result info with effective values
+    - For error: includes error code, message, and details
 
     CACHE POLLUTION WARNING:
     This function returns a dict that shares nested objects with the cached base.
@@ -768,7 +1029,72 @@ def build_dedupe_response_dict(
         },
     }
 
-    # Build result info (read-only from cache, do not modify!)
+    # Build record info (read-only from cache)
+    record_info = {
+        "zone": base.zone,
+        "type": base.record_type,
+        "name": base.record,
+    }
+
+    # Handle error responses
+    if base.status == "error" and base.error_code:
+        # Convert error_details tuple back to dict
+        error_details_dict = None
+        if base.error_details:
+            error_details_dict = dict(base.error_details)
+
+        # Build warnings list
+        warnings_list: list[dict] = []
+        for w in base.warnings:
+            if isinstance(w, dict):
+                warnings_list.append(w)
+            elif hasattr(w, "model_dump"):
+                warnings_list.append(w.model_dump(exclude_none=True))
+            elif hasattr(w, "dict"):
+                warnings_list.append(w.dict(exclude_none=True))
+            else:
+                warnings_list.append(
+                    {
+                        "code": getattr(w, "code", str(w)),
+                        "message": getattr(w, "message", str(w)),
+                        "field": getattr(w, "field", None),
+                        "details": getattr(w, "details", None),
+                    },
+                )
+
+        # Add dedupe hit warning for error responses too
+        warnings_list.append(
+            {
+                "code": "DEDUPE_HIT_SHORTCIRCUIT",
+                "message": "Request was short-circuited due to deduplication cache hit. No upstream API call was made.",
+                "field": "dedupe",
+                "details": {
+                    "window_sec": window_seconds,
+                    "cached_error": True,
+                },
+            },
+        )
+
+        return {
+            "status": "error",
+            "action": "deduped",
+            "upstream_called": False,
+            "provider": base.provider,
+            "record": record_info,
+            "result": None,
+            "warnings": warnings_list,
+            "errors": [
+                {
+                    "code": base.error_code,
+                    "message": base.error_message,
+                    "details": error_details_dict,
+                },
+            ],
+            "meta": fresh_meta,
+            "debug": None,
+        }
+
+    # Build result info for success responses (read-only from cache, do not modify!)
     result_info = None
     if base.record_id is not None or base.value:
         effective = {
@@ -788,13 +1114,6 @@ def build_dedupe_response_dict(
             "upstream": upstream,
             "previous_value": base.previous_value,
         }
-
-    # Build record info (read-only from cache)
-    record_info = {
-        "zone": base.zone,
-        "type": base.record_type,
-        "name": base.record,
-    }
 
     # Add DEDUPE_HIT_SHORTCIRCUIT warning to indicate cache hit
     # This allows RouterOS scripts to distinguish between "no upstream call"
@@ -923,3 +1242,101 @@ def create_cached_base(
         previous_value=previous_value,
         warnings=tuple(warnings),  # Ensure immutable
     )
+
+
+def create_cached_error_base(
+    *,
+    error_code: str,
+    error_message: str,
+    provider: str,
+    zone: str,
+    record_type: str,
+    record: str,
+    error_details: dict | None = None,
+    warnings: list | tuple | None = None,
+) -> CachedResponseBase:
+    """
+    Create a CachedResponseBase for error responses.
+
+    Error responses are cached because:
+    1. Upstream API calls include automatic retry for transient errors (429, 5xx).
+       By the time an error reaches here, it's either a permanent error (invalid
+       credentials, permission denied) or a persistent issue (retries exhausted).
+    2. Since upstream credentials are included in the cache key, caching errors
+       won't affect requests from users with different credentials.
+    3. This prevents redundant upstream API calls for repeated identical requests
+       with the same (invalid) credentials within the cache window.
+
+    Parameters
+    ----------
+    error_code : str
+        The error code (e.g., "UPSTREAM_AUTH_ERROR").
+    error_message : str
+        Human-readable error message.
+    provider : str
+        Provider name (lowercase).
+    zone : str
+        Normalized zone.
+    record_type : str
+        Record type (uppercase).
+    record : str
+        Normalized record name.
+    error_details : dict | None
+        Optional additional error details.
+    warnings : list | tuple | None
+        Optional warnings to include.
+
+    Returns
+    -------
+    CachedResponseBase
+        Immutable cached error response base.
+    """
+    # Convert error_details dict to tuple of (key, value) pairs for immutability
+    details_tuple = None
+    if error_details:
+        details_tuple = tuple(sorted(error_details.items()))
+
+    return CachedResponseBase(
+        status="error",
+        original_action="error",
+        provider=provider,
+        zone=zone,
+        record_type=record_type,
+        record=record,
+        record_id=None,
+        zone_id=None,
+        value="",
+        ttl=None,
+        comment=None,
+        proxied=None,
+        previous_value=None,
+        warnings=tuple(warnings) if warnings else (),
+        error_code=error_code,
+        error_message=error_message,
+        error_details=details_tuple,
+    )
+
+
+def compute_credential_hash(credentials: dict[str, str] | None) -> str | None:
+    """
+    Compute SHA256 hash of credentials for cache key.
+
+    This function creates a deterministic hash of the credentials dict
+    for use in the dedupe cache key. The hash is irreversible, ensuring
+    no credential leakage through the cache.
+
+    Parameters
+    ----------
+    credentials : dict[str, str] | None
+        The upstream credentials (id, secret).
+
+    Returns
+    -------
+    str | None
+        SHA256 hex digest of the credentials, or None if no credentials.
+    """
+    if not credentials:
+        return None
+    # Sort keys for deterministic JSON
+    cred_json = json.dumps(credentials, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(cred_json.encode()).hexdigest()

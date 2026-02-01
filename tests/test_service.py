@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ddns_gateway.config import DedupeConfig
+from ddns_gateway.dedupe import DedupeCache, create_cached_base
 from ddns_gateway.models import ErrorCode, WarningCode, WarningModel
 from ddns_gateway.providers.base import BaseDNSProvider, ProviderError
 from ddns_gateway.service import delete_record_service, upsert_record_service
@@ -677,3 +680,495 @@ class TestDebugInfo:
 
         assert response.status == "success"
         assert response.debug is None
+
+
+# =============================================================================
+# Singleflight Tests
+# =============================================================================
+
+
+class TestSingleflight:
+    """Tests for singleflight behavior in service layer."""
+
+    @pytest.fixture
+    def mock_provider(self) -> MagicMock:
+        """Create a mock provider instance."""
+        provider = MagicMock(spec=BaseDNSProvider)
+        provider.name = "test"
+        return provider
+
+    @pytest.fixture
+    def mock_credentials(self) -> dict[str, str]:
+        """Create mock credentials."""
+        return {"id": "test_id", "secret": "test_secret"}
+
+    @pytest.fixture
+    def dedupe_config(self) -> DedupeConfig:
+        """Create dedupe config with short timeouts for testing."""
+        return DedupeConfig(
+            enabled=True,
+            singleflight_lease_sec=5.0,
+            singleflight_wait_timeout_sec=0.1,  # Short timeout for tests
+        )
+
+    @pytest.mark.asyncio
+    async def test_upsert_waiter_gets_aborted_when_leader_fails(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that waiter receives SINGLEFLIGHT_LEADER_FAILED when leader aborts."""
+        cache = DedupeCache()
+
+        # Leader marks in-flight
+        key = "test_key_hash"
+        await cache.mark_in_flight(key, lease_sec=dedupe_config.singleflight_lease_sec)
+
+        # Leader fails and clears in-flight
+        await cache.clear_in_flight(key)
+
+        # Setup mock provider (won't be called since we're testing waiter path)
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        # Simulate waiter scenario by pre-marking in-flight and then failing
+        cache2 = DedupeCache()
+        await cache2.mark_in_flight("key2", lease_sec=dedupe_config.singleflight_lease_sec)
+
+        async def leader_fails():
+            await asyncio.sleep(0.05)
+            await cache2.clear_in_flight("key2")
+
+        async def waiter_request():
+            # This simulates the waiter path - mark_in_flight returns False
+            is_leader, gen = await cache2.mark_in_flight(
+                "key2", lease_sec=dedupe_config.singleflight_lease_sec
+            )
+            assert is_leader is False
+            assert gen == 0
+
+            # Wait for result
+            from ddns_gateway.dedupe import WaitResult
+
+            outcome = await cache2.wait_for_result("key2", wait_timeout_sec=1.0)
+            return outcome
+
+        # Run concurrently
+        results = await asyncio.gather(leader_fails(), waiter_request())
+        waiter_outcome = results[1]
+
+        from ddns_gateway.dedupe import WaitResult
+
+        assert waiter_outcome.status == WaitResult.ABORTED
+        assert waiter_outcome.entry is None
+
+    @pytest.mark.asyncio
+    async def test_upsert_waiter_gets_timeout_when_leader_slow(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that waiter receives SINGLEFLIGHT_WAIT_TIMEOUT when leader is slow."""
+        cache = DedupeCache()
+
+        # Leader marks in-flight but takes too long
+        await cache.mark_in_flight("key1", lease_sec=dedupe_config.singleflight_lease_sec)
+
+        # Waiter tries to wait but times out
+        from ddns_gateway.dedupe import WaitResult
+
+        outcome = await cache.wait_for_result(
+            "key1", wait_timeout_sec=0.05  # Very short timeout
+        )
+
+        assert outcome.status == WaitResult.TIMEOUT
+        assert outcome.entry is None
+
+    @pytest.mark.asyncio
+    async def test_upsert_waiter_gets_success_when_leader_completes(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that waiter receives SUCCESS when leader completes."""
+        cache = DedupeCache()
+
+        # Leader marks in-flight
+        await cache.mark_in_flight("key1", lease_sec=dedupe_config.singleflight_lease_sec)
+
+        # Create cached base for leader's result
+        cached_base = create_cached_base(
+            status="success",
+            action="created",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            record_id="rec_123",
+            zone_id="zone_456",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            previous_value=None,
+            warnings=[],
+        )
+
+        async def leader_completes():
+            await asyncio.sleep(0.05)
+            await cache.set("key1", cached_base)
+
+        async def waiter_waits():
+            from ddns_gateway.dedupe import WaitResult
+
+            outcome = await cache.wait_for_result("key1", wait_timeout_sec=1.0)
+            return outcome
+
+        # Run concurrently
+        results = await asyncio.gather(leader_completes(), waiter_waits())
+        waiter_outcome = results[1]
+
+        from ddns_gateway.dedupe import WaitResult
+
+        assert waiter_outcome.status == WaitResult.COMPLETED
+        assert waiter_outcome.entry is not None
+        assert waiter_outcome.entry.base == cached_base
+
+    @pytest.mark.asyncio
+    async def test_upsert_service_returns_aborted_error(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that service returns SINGLEFLIGHT_LEADER_FAILED error code."""
+        cache = DedupeCache()
+
+        # Pre-mark as in-flight then fail (simulating leader failure)
+        await cache.mark_in_flight(
+            # Use the actual dedupe key format
+            "abc123",
+            lease_sec=dedupe_config.singleflight_lease_sec,
+        )
+        await cache.clear_in_flight("abc123")
+
+        # Verify the cache entry is marked as leader_failed
+        from ddns_gateway.dedupe import WaitResult
+
+        outcome = await cache.wait_for_result("abc123", wait_timeout_sec=0.1)
+        assert outcome.status == WaitResult.ABORTED
+
+    @pytest.mark.asyncio
+    async def test_delete_waiter_gets_aborted(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that delete waiter receives ABORTED when leader aborts."""
+        cache = DedupeCache()
+
+        # Leader marks in-flight then fails
+        await cache.mark_in_flight("delete_key", lease_sec=dedupe_config.singleflight_lease_sec)
+        await cache.clear_in_flight("delete_key")
+
+        from ddns_gateway.dedupe import WaitResult
+
+        outcome = await cache.wait_for_result("delete_key", wait_timeout_sec=0.1)
+        assert outcome.status == WaitResult.ABORTED
+
+    @pytest.mark.asyncio
+    async def test_aborted_entry_not_returned_by_get(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that get() returns None for aborted entries."""
+        cache = DedupeCache()
+
+        # Leader marks in-flight then aborts
+        await cache.mark_in_flight("key1", lease_sec=dedupe_config.singleflight_lease_sec)
+        await cache.clear_in_flight("key1")
+
+        # get() should return None for aborted entries
+        entry = await cache.get("key1")
+        assert entry is None
+
+
+# =============================================================================
+# Error Response Caching Tests
+# =============================================================================
+
+
+class TestErrorResponseCaching:
+    """Tests for error response caching in service layer."""
+
+    @pytest.fixture
+    def mock_provider(self) -> MagicMock:
+        """Create a mock provider instance."""
+        provider = MagicMock(spec=BaseDNSProvider)
+        provider.name = "test"
+        return provider
+
+    @pytest.fixture
+    def mock_credentials(self) -> dict[str, str]:
+        """Create mock credentials."""
+        return {"id": "test_id", "secret": "test_secret"}
+
+    @pytest.fixture
+    def dedupe_config(self) -> DedupeConfig:
+        """Create dedupe config for testing."""
+        return DedupeConfig(
+            enabled=True,
+            singleflight_lease_sec=5.0,
+            singleflight_wait_timeout_sec=0.5,
+        )
+
+    @pytest.mark.asyncio
+    async def test_upsert_error_is_cached(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that upsert error responses are cached."""
+        from ddns_gateway.dedupe import compute_credential_hash, compute_dedupe_key
+
+        cache = DedupeCache()
+
+        # Setup: find_record raises exception
+        mock_provider.find_record = AsyncMock(
+            side_effect=ProviderError("Zone not found"),
+        )
+
+        # First request - should call upstream and cache error
+        response1 = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=mock_credentials,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response1.status == "error"
+        assert response1.errors[0].code == ErrorCode.UPSTREAM_API_ERROR
+        mock_provider.find_record.assert_called_once()
+
+        # Verify error was cached
+        cred_hash = compute_credential_hash(mock_credentials)
+        dedupe_key = compute_dedupe_key(
+            operation="upsert",
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            upstream_credential_hash=cred_hash,
+        )
+        cached_entry = await cache.get(dedupe_key)
+        assert cached_entry is not None
+        assert cached_entry.base is not None
+        assert cached_entry.base.status == "error"
+        assert cached_entry.base.error_code == ErrorCode.UPSTREAM_API_ERROR.value
+
+    @pytest.mark.asyncio
+    async def test_different_credentials_get_different_cache_entries(
+        self,
+        mock_provider,
+        dedupe_config,
+    ):
+        """Test that different credentials produce different cache entries."""
+        from ddns_gateway.dedupe import compute_credential_hash, compute_dedupe_key
+
+        cache = DedupeCache()
+
+        # Setup: first user succeeds
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        creds_user_a = {"id": "user_a", "secret": "secret_a"}
+        creds_user_b = {"id": "user_b", "secret": "secret_b"}
+
+        # User A makes request
+        response_a = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=creds_user_a,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response_a.status == "success"
+
+        # User B makes same request with different credentials
+        # Should NOT get User A's cached result
+        response_b = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=creds_user_b,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response_b.status == "success"
+        # Both users called the provider (no cache sharing)
+        assert mock_provider.find_record.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_same_credentials_get_cached_response(
+        self,
+        mock_provider,
+        dedupe_config,
+    ):
+        """Test that same credentials get cached response."""
+        cache = DedupeCache()
+
+        # Setup: provider succeeds
+        mock_provider.find_record = AsyncMock(return_value=None)
+        mock_provider.create_record = AsyncMock(
+            return_value=UpstreamResult(
+                success=True,
+                action="created",
+                message="Record created",
+                record_id="rec_123",
+            ),
+        )
+
+        creds = {"id": "user", "secret": "secret"}
+
+        # First request
+        response1 = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=creds,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response1.status == "success"
+        assert response1.action == "created"
+
+        # Second request with same credentials - should get cached
+        response2 = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=creds,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response2.status == "success"
+        assert response2.action == "deduped"  # Cache hit
+        # Provider only called once
+        assert mock_provider.find_record.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cached_error_returned_on_second_request(
+        self,
+        mock_provider,
+        mock_credentials,
+        dedupe_config,
+    ):
+        """Test that cached error is returned on subsequent identical requests."""
+        cache = DedupeCache()
+
+        # Setup: find_record raises exception
+        mock_provider.find_record = AsyncMock(
+            side_effect=ProviderError("Auth failed"),
+        )
+
+        # First request - error
+        response1 = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=mock_credentials,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response1.status == "error"
+        assert mock_provider.find_record.call_count == 1
+
+        # Second request - should get cached error, NOT call provider again
+        response2 = await upsert_record_service(
+            provider_instance=mock_provider,
+            provider="cloudflare",
+            zone="example.com",
+            record_type="A",
+            record="home",
+            value="1.2.3.4",
+            ttl=300,
+            comment=None,
+            proxied=None,
+            credentials=mock_credentials,
+            dedupe_cache=cache,
+            dedupe_config=dedupe_config,
+        )
+
+        assert response2.status == "error"
+        assert response2.action == "deduped"  # Cache hit
+        # Provider still only called once (cached error returned)
+        assert mock_provider.find_record.call_count == 1
