@@ -540,9 +540,7 @@ class DedupeCache:
         async with self._lock:
             now = time.time()
             expired = [
-                k
-                for k, v in self._entries.items()
-                if now - v.timestamp > max_age_sec
+                k for k, v in self._entries.items() if now - v.timestamp > max_age_sec
             ]
             for k in expired:
                 del self._entries[k]
@@ -1105,6 +1103,8 @@ def build_dedupe_response_dict(
         "name": base.record,
     }
 
+    warnings_list: list[dict]
+
     # Handle error responses
     if base.status == "error" and base.error_code:
         # Convert error_details tuple back to dict
@@ -1113,7 +1113,7 @@ def build_dedupe_response_dict(
             error_details_dict = dict(base.error_details)
 
         # Build warnings list
-        warnings_list: list[dict] = []
+        warnings_list = []
         for w in base.warnings:
             if isinstance(w, dict):
                 warnings_list.append(w)
@@ -1190,7 +1190,7 @@ def build_dedupe_response_dict(
     # Both the action field (action="deduped" vs action="unchanged") and this
     # warning code can be used for machine-readable detection.
     # Convert all warnings to dict format for consistency
-    warnings_list: list[dict] = []
+    warnings_list = []
     for w in base.warnings:
         if isinstance(w, dict):
             warnings_list.append(w)
