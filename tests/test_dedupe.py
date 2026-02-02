@@ -254,8 +254,8 @@ class TestDedupeCache:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_cleanup(self, sample_base: CachedResponseBase):
-        """Test cleanup removes expired entries."""
+    async def test_evict_expired(self, sample_base: CachedResponseBase):
+        """Test evict_expired removes expired entries."""
         cache = DedupeCache(max_entries=10, window_seconds=1)
 
         await cache.set("key1", sample_base)
@@ -266,8 +266,8 @@ class TestDedupeCache:
         # Wait for expiration
         await asyncio.sleep(1.1)
 
-        # Cleanup should remove expired entries
-        removed = await cache.cleanup()
+        # evict_expired should remove expired entries
+        removed = await cache.evict_expired()
         assert removed == 2
         assert await cache.size() == 0
 
