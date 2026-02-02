@@ -478,13 +478,7 @@ class DedupeCache:
             )
 
             # Evict oldest entries if at capacity
-            while len(self._entries) >= self._max_entries:
-                oldest_key, oldest_entry = self._entries.popitem(last=False)
-                logger.debug(
-                    '[dedupe] Evicted oldest: "%s" (Age: "%.1fs") ...',
-                    oldest_key[:16],
-                    now - oldest_entry.timestamp,
-                )
+            self._evict_overflow_unlocked()
 
             self._entries[key_hash] = entry
             self._entries.move_to_end(key_hash)
@@ -523,31 +517,106 @@ class DedupeCache:
                 return True
             return False
 
-    async def cleanup(self) -> int:
+    async def evict_expired(
+        self,
+        *,
+        max_age_sec: float | None = None,
+    ) -> int:
         """
-        Remove all expired entries.
+        Remove entries older than max_age_sec.
+
+        Parameters
+        ----------
+        max_age_sec : float | None
+            Maximum age in seconds. Defaults to self._window_seconds.
 
         Returns
         -------
         int
-            Number of entries removed.
+            Number of entries evicted.
         """
+        if max_age_sec is None:
+            max_age_sec = self._window_seconds
         async with self._lock:
             now = time.time()
             expired = [
                 k
                 for k, v in self._entries.items()
-                if now - v.timestamp > self._window_seconds
+                if now - v.timestamp > max_age_sec
             ]
             for k in expired:
                 del self._entries[k]
 
             if expired:
                 logger.debug(
-                    "[dedupe] Cleanup removed %d expired entries ...",
+                    "[dedupe] Evicted %d expired entries ...",
                     len(expired),
                 )
             return len(expired)
+
+    def _evict_overflow_unlocked(self, max_entries: int | None = None) -> int:
+        """
+        Evict oldest entries until size < max_entries (no lock).
+
+        .. warning::
+
+            This is an internal method that does NOT acquire the lock.
+            It MUST only be called from within an ``async with self._lock:`` block.
+
+            For external use, call :meth:`evict_overflow` instead, which
+            automatically acquires the lock before evicting.
+
+        This method exists because ``asyncio.Lock`` is not reentrant. Methods
+        like ``set()`` that already hold the lock need to call this unlocked
+        version to avoid deadlock.
+
+        Parameters
+        ----------
+        max_entries : int | None
+            Maximum entries to keep. Defaults to self._max_entries.
+
+        Returns
+        -------
+        int
+            Number of entries evicted.
+
+        See Also
+        --------
+        evict_overflow : Public method that acquires lock automatically.
+        """
+        limit = max_entries if max_entries is not None else self._max_entries
+        now = time.time()
+        count = 0
+        while len(self._entries) >= limit:
+            oldest_key, oldest_entry = self._entries.popitem(last=False)
+            count += 1
+            logger.debug(
+                '[dedupe] Evicted oldest: "%s" (Age: "%.1fs") ...',
+                oldest_key[:16],
+                now - oldest_entry.timestamp,
+            )
+        return count
+
+    async def evict_overflow(
+        self,
+        *,
+        max_entries: int | None = None,
+    ) -> int:
+        """
+        Evict oldest entries until size < max_entries.
+
+        Parameters
+        ----------
+        max_entries : int | None
+            Maximum entries to keep. Defaults to self._max_entries.
+
+        Returns
+        -------
+        int
+            Number of entries evicted.
+        """
+        async with self._lock:
+            return self._evict_overflow_unlocked(max_entries)
 
     async def clear(self) -> int:
         """
