@@ -1,7 +1,7 @@
 # DDNS Gateway
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-yellow.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 DDNS Gateway is a DDNS update service designed for RouterOS, implemented with a fully asynchronous architecture.
 
@@ -609,7 +609,7 @@ level = "DEBUG"
 
 DDNS Gateway includes a built-in request deduplication cache to avoid redundant upstream API calls for identical requests within a short time window.
 
-#### Cache Key Computation
+#### 8.1.1. Cache Key Computation
 
 The cache key is computed from the following fields (SHA256 hash):
 
@@ -633,7 +633,7 @@ The cache key is computed from the following fields (SHA256 hash):
 - User A's auth error (e.g., 403) won't affect User B with valid credentials
 - The hash is irreversible, no credential leakage risk
 
-#### Cache Lookup Flow
+#### 8.1.2. Cache Lookup Flow
 
 When a request arrives, the system checks the cache in the following order:
 
@@ -681,7 +681,7 @@ When a request arrives, the system checks the cache in the following order:
 3. in_flight? → Yes → Return None (another request is processing, wait for result)
 4. None of the above → ✅ Cache hit, return cached result (including error responses)
 
-#### Error Response Caching
+#### 8.1.3. Error Response Caching
 
 Error responses are also cached because:
 1. Upstream API calls include automatic retry for transient errors
